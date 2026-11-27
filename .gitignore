@@ -1,0 +1,11 @@
+/target
+
+# Never commit game data: OpenADV2 only reads files from your own copy.
+*.DAT
+*.dat
+*.AVI
+*.avi
+*.SAV
+*.sav
+/extracted/
+/out/
