@@ -185,7 +185,7 @@ fn shell(dir: &Path, options: &LaunchOptions, new_game: bool) -> Result<Shell, S
         ShellOptions {
             data_dir: vnr_core::user_data_dir(),
             saves,
-            fixed_font: options.font.is_some(),
+            font_file: options.font.clone(),
         },
     );
     shell.attach_launcher(
@@ -211,7 +211,7 @@ fn launcher_shell(options: &LaunchOptions) -> Result<Shell, String> {
         ShellOptions {
             data_dir: vnr_core::user_data_dir(),
             saves: None,
-            fixed_font: options.font.is_some(),
+            font_file: options.font.clone(),
         },
     ))
 }
@@ -318,7 +318,7 @@ mod tests {
             ShellOptions {
                 data_dir: Some(scratch.join("data")),
                 saves: options.saves.clone(),
-                fixed_font: false,
+                font_file: None,
             },
         );
         shell.attach_launcher(

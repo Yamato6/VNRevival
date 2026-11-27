@@ -41,9 +41,9 @@ pub struct ShellOptions {
     pub data_dir: Option<PathBuf>,
     /// The game's save folder; `None` disables saving.
     pub saves: Option<PathBuf>,
-    /// The font was chosen on the command line: the font setting does not
-    /// replace it.
-    pub fixed_font: bool,
+    /// A font file chosen on the command line: it replaces both font
+    /// settings.
+    pub font_file: Option<PathBuf>,
 }
 
 /// A change of the window the shell asks the frontend for.
@@ -100,6 +100,7 @@ enum Setting {
     TextSpeed,
     Window,
     Font,
+    GameFont,
     TextSize,
     LineSpacing,
     Outline,
@@ -114,6 +115,7 @@ impl Setting {
         match tab {
             0 => &[
                 Setting::Language,
+                Setting::Font,
                 Setting::Start,
                 Setting::Fullscreen,
                 Setting::UnlockAll,
@@ -125,7 +127,7 @@ impl Setting {
                 Setting::Voice,
             ],
             2 => &[
-                Setting::Font,
+                Setting::GameFont,
                 Setting::TextSize,
                 Setting::LineSpacing,
                 Setting::Outline,
@@ -174,6 +176,7 @@ impl Setting {
             Setting::TextSpeed => "settings.text_speed",
             Setting::Window => "settings.window",
             Setting::Font => "settings.font",
+            Setting::GameFont => "settings.game_font",
             Setting::TextSize => "settings.text_size",
             Setting::LineSpacing => "settings.line_spacing",
             Setting::Outline => "settings.outline",
@@ -218,11 +221,16 @@ impl Setting {
                     StartScreen::Original => StartScreen::Universal,
                 }
             }
-            Setting::Font => {
+            Setting::Font | Setting::GameFont => {
+                let font = if self == Setting::Font {
+                    &mut s.font
+                } else {
+                    &mut s.game_font
+                };
                 let all = FontChoice::installed();
-                let i = all.iter().position(|&f| f == s.font).unwrap_or(0);
+                let i = all.iter().position(|f| f == font).unwrap_or(0);
                 let n = all.len();
-                s.font = all[if forward {
+                *font = all[if forward {
                     (i + 1) % n
                 } else {
                     (i + n - 1) % n
@@ -374,8 +382,11 @@ pub struct Shell {
     replaying: bool,
     /// The game is in progress but a screen covers it.
     frozen: bool,
-    /// The font comes from the command line.
-    fixed_font: bool,
+    /// The font file from the command line.
+    font_file: Option<PathBuf>,
+    /// Font of the game text in the history and the settings preview
+    /// (`None`: it could not be loaded, the interface font is used).
+    game_font: Option<Font>,
     /// Auto mode is on.
     auto: bool,
     /// Finds and opens games for the library, when there is one.
@@ -401,12 +412,17 @@ impl Shell {
             .as_ref()
             .map(|d| Settings::load(&d.join("settings.json")))
             .unwrap_or_default();
-        if !options.fixed_font && settings.font != FontChoice::default() {
+        if options.font_file.is_none() && settings.font != FontChoice::default() {
             match settings.font.load(FontFamily::Gothic) {
                 Ok(chosen) => font = chosen,
                 Err(e) => eprintln!("{e}"),
             }
         }
+        let game_font = match &options.font_file {
+            Some(path) => Font::load(path, 0),
+            None => settings.game_font.load(FontFamily::Gothic),
+        };
+        let game_font = game_font.map_err(|e| eprintln!("{e}")).ok();
         let lang_dir = options.data_dir.as_ref().map(|d| d.join("lang"));
         let strings = Strings::new(settings.language, lang_dir.as_deref());
         let (w, h) = session.resolution();
@@ -420,7 +436,8 @@ impl Shell {
             thumbs: HashMap::new(),
             replaying: false,
             frozen: false,
-            fixed_font: options.fixed_font,
+            font_file: options.font_file.clone(),
+            game_font,
             auto: false,
             launcher: None,
             library: Library::open(options.data_dir.clone()),
@@ -547,12 +564,20 @@ impl Shell {
     pub fn set_settings(&mut self, settings: Settings) {
         let language = self.settings.language;
         let fullscreen = self.settings.fullscreen;
-        let font = self.settings.font;
+        let (font, game_font) = (self.settings.font, self.settings.game_font);
         self.settings = settings;
-        if self.settings.font != font && !self.fixed_font {
-            match self.settings.font.load(FontFamily::Gothic) {
-                Ok(chosen) => self.font = chosen,
-                Err(e) => eprintln!("{e}"),
+        if self.font_file.is_none() {
+            if self.settings.font != font {
+                match self.settings.font.load(FontFamily::Gothic) {
+                    Ok(chosen) => self.font = chosen,
+                    Err(e) => eprintln!("{e}"),
+                }
+            }
+            if self.settings.game_font != game_font {
+                match self.settings.game_font.load(FontFamily::Gothic) {
+                    Ok(chosen) => self.game_font = Some(chosen),
+                    Err(e) => eprintln!("{e}"),
+                }
             }
         }
         if self.settings.language != language {
@@ -700,7 +725,7 @@ impl Shell {
                 gap = 0;
             }
             for (n, line) in self
-                .font
+                .text_font()
                 .wrap(&entry.text, size, width)
                 .into_iter()
                 .enumerate()
@@ -1315,7 +1340,7 @@ impl Shell {
                         let mark = top + (size * 0.55) as i32 - 4;
                         canvas.fill_rect(HISTORY_PANEL.x + 40, mark, 8, 8, theme::ACCENT);
                     }
-                    ui::label(canvas, &mut self.font, x, top, &row.text, size, color);
+                    ui::label(canvas, self.text_font(), x, top, &row.text, size, color);
                 }
                 let hint = self.strings.get("history.hint").to_string();
                 ui::label(
@@ -1386,12 +1411,19 @@ impl Shell {
                                     StartScreen::Original => "settings.start.original",
                                 })
                                 .to_string(),
-                            Setting::Font => match self.settings.font {
-                                FontChoice::Original => {
-                                    self.strings.get("settings.font.original").to_string()
+                            Setting::Font | Setting::GameFont => {
+                                let font = if setting == Setting::Font {
+                                    self.settings.font
+                                } else {
+                                    self.settings.game_font
+                                };
+                                match font {
+                                    FontChoice::Original => {
+                                        self.strings.get("settings.font.original").to_string()
+                                    }
+                                    font => font.name().to_string(),
                                 }
-                                font => font.name().to_string(),
-                            },
+                            }
                             Setting::Outline => self
                                 .strings
                                 .get(match self.settings.outline {
@@ -1444,6 +1476,14 @@ impl Shell {
         }
     }
 
+    /// The font of the game text.
+    fn text_font(&mut self) -> &mut Font {
+        match &mut self.game_font {
+            Some(font) => font,
+            None => &mut self.font,
+        }
+    }
+
     /// A sample message as the game text settings draw it.
     fn draw_text_preview(&mut self, canvas: &mut Canvas) {
         let rows = Setting::tab(TEXT_TAB).len();
@@ -1468,7 +1508,7 @@ impl Shell {
         let line = self.settings.line_height(size);
         let mut y = area.y as f32 + 6.0;
         for text in self
-            .font
+            .text_font()
             .wrap(&sample, size, area.w as f32 - 32.0)
             .iter()
             .take(2)
@@ -1476,7 +1516,7 @@ impl Shell {
             if y + line > area.bottom() as f32 + 4.0 {
                 break;
             }
-            self.font
+            self.text_font()
                 .draw_line(canvas, area.x as f32 + 16.0, y, text, style);
             y += line;
         }
@@ -1818,7 +1858,7 @@ mod tests {
         let options = ShellOptions {
             data_dir: Some(dir.join("data")),
             saves: Some(dir.join("saves")),
-            fixed_font: false,
+            font_file: None,
         };
         let game = Counter::default();
         let log = game.0.clone();
@@ -2001,7 +2041,7 @@ mod tests {
         let options = ShellOptions {
             data_dir: Some(dir.join("data")),
             saves: None,
-            fixed_font: false,
+            font_file: None,
         };
         let mut shell = Shell::launcher(Box::new(FakeLauncher(game)), font, options);
         let mixer = Mixer::new(1);
@@ -2112,6 +2152,19 @@ mod tests {
         );
         assert_eq!(log.borrow().started.last(), Some(&Start::OriginalTitle));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn interface_and_game_fonts_are_separate() {
+        let mut s = Settings::default();
+        Setting::GameFont.cycle(&mut s, false);
+        // Backwards from the first installed font: the last one, Original.
+        assert_eq!(s.game_font, FontChoice::Original);
+        assert_eq!(s.font, FontChoice::NotoSansJp);
+        Setting::Font.cycle(&mut s, false);
+        assert_eq!(s.font, FontChoice::Original);
+        assert!(Setting::tab(0).contains(&Setting::Font));
+        assert!(Setting::tab(TEXT_TAB).contains(&Setting::GameFont));
     }
 
     #[test]

@@ -1713,8 +1713,8 @@ impl Session for Game {
         self.engine.player = settings.clone();
         self.engine.apply_volumes();
         let fonts = &self.engine.fonts;
-        if fonts.choice.is_some_and(|c| c != settings.font) {
-            match Fonts::load(None, settings.font) {
+        if fonts.choice.is_some_and(|c| c != settings.game_font) {
+            match Fonts::load(None, settings.game_font) {
                 Ok(fonts) => self.engine.fonts = fonts,
                 Err(e) => eprintln!("{e}"),
             }
@@ -1965,7 +1965,7 @@ mod tests {
 
         // The original fonts can still be picked.
         game.apply(&PlayerSettings {
-            font: FontChoice::Original,
+            game_font: FontChoice::Original,
             ..PlayerSettings::default()
         });
         assert_eq!(game.engine.fonts.choice, Some(FontChoice::Original));

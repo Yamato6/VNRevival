@@ -144,11 +144,11 @@ scene is the opening movie.
 
 The settings screen (F4) has four tabs:
 
-* **System**: interface language (English, Spanish or Japanese), what to
-  show at start (VNRevival's menu or the game's title), full screen,
+* **System**: interface language (English, Spanish or Japanese), the
+  interface font, what to show at start (VNRevival's menu or the game's title), full screen,
   unlock all extras.
 * **Sound**: master, music, sound effect and voice volumes.
-* **Text**, with a preview: font, text size (18 to 30 pixels of game
+* **Text**, with a preview: the game text font, text size (18 to 30 pixels of game
   text), line spacing, text edge (none, shadow or a full outline), high
   contrast (an opaque black window with white text) and window opacity.
   The message window grows upwards when larger text needs the room.
@@ -171,8 +171,10 @@ the hero's names in `options.json`.
 
 ### Fonts
 
-The interface and the game text use **Noto Sans JP** by default. The
-font setting offers the fonts that are installed among Noto Sans JP,
+The interface and the game text use **Noto Sans JP** by default, each
+with its own setting (System → Interface font, Text → Game text font;
+the history follows the game text font). Both offer the fonts that are
+installed among Noto Sans JP,
 Noto Serif JP, BIZ UDPGothic, BIZ UDPMincho, Yu Gothic and Meiryo, and
 **Original**: the fonts the game asked for (ＭＳ Ｐ明朝, ＭＳ Ｐゴシック),
 or the closest substitute installed. When the chosen font is missing the
@@ -181,7 +183,7 @@ from Google Fonts) are drawn at a regular weight, with a real bold.
 
 Noto Sans JP is free (SIL Open Font License): install it from Google
 Fonts on Windows and macOS, or `fonts-noto-cjk` on Linux. `--font`
-picks a font file instead of the setting.
+picks a font file for both instead of the settings.
 
 ## Building and testing
 

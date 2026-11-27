@@ -64,8 +64,10 @@ pub struct Settings {
     pub text_speed: u8,
     /// Opacity of the message window.
     pub window: u8,
-    /// Font of the interface and of the game text.
+    /// Font of VNRevival's own screens.
     pub font: FontChoice,
+    /// Font of the game text (messages, choices, the history).
+    pub game_font: FontChoice,
     /// Size of the game text (step).
     pub text_size: u8,
     /// Space between lines (step).
@@ -95,6 +97,7 @@ impl Default for Settings {
             text_speed: 5,
             window: 6,
             font: FontChoice::default(),
+            game_font: FontChoice::default(),
             text_size: 2,
             line_spacing: 2,
             outline: Outline::default(),
@@ -183,6 +186,7 @@ mod tests {
         assert_eq!(partial.voice, MAX_LEVEL);
         // Files from before the accessibility settings keep the defaults.
         assert_eq!(partial.font, FontChoice::NotoSansJp);
+        assert_eq!(partial.game_font, FontChoice::NotoSansJp);
         assert_eq!((partial.text_px(), partial.line_height(22.0)), (22.0, 30.0));
         assert_eq!(partial.outline, Outline::Shadow);
         assert!(partial.wait_voice && !partial.skip_unread);

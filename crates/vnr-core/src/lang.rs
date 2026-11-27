@@ -144,7 +144,18 @@ const TEXTS: &[(&str, &str, &str, &str)] = &[
         "ウィンドウの濃さ",
     ),
     ("settings.tab.reading", "Reading", "Lectura", "読み進め"),
-    ("settings.font", "Font", "Fuente", "フォント"),
+    (
+        "settings.font",
+        "Interface font",
+        "Fuente de la interfaz",
+        "メニューのフォント",
+    ),
+    (
+        "settings.game_font",
+        "Game text font",
+        "Fuente del juego",
+        "本文のフォント",
+    ),
     (
         "settings.font.original",
         "Original (MS P Gothic / Mincho)",
