@@ -11,7 +11,7 @@ VNRevival ships **no game data**.
 
 | Engine | Games | Status |
 |---|---|---|
-| OverflowADV2 (`adv2`) | Pure Mail (2001) | Script preview (pictures, text, sound); interpreter in progress |
+| OverflowADV2 (`adv2`) | Pure Mail (2001) | Boots and plays on the original scripts; many engine functions still missing |
 
 ## How it fits together
 
@@ -55,23 +55,29 @@ cargo run --release -- run "<game dir>"    # play
 
 | Option | Meaning |
 |---|---|
-| `--script NAME` | start from another script (Pure Mail: `PRO1` by default) |
+| `--script NAME` | start from another script instead of the normal entry point |
 | `--font FILE` | font to use instead of the system's Japanese fonts |
 | `--scale N` | initial window size, 1–4 times the game resolution |
 | `--frames N` | run without a window for N frames (60 per second) |
 | `--screenshot FILE` | with `--frames`: save the last frame as PNG |
 | `--click-every N` | with `--frames`: click every N frames |
+| `--click-at X,Y` | where those clicks land (default `0,0`) |
 
 In the window: click, Enter or Space advance the text, right-click hides
 the message window, Ctrl skips, Escape quits, Alt+Enter toggles full
 screen. The window can be resized; the picture keeps its aspect ratio.
 
-**Pure Mail today:** the script interpreter is not written yet, so `run`
-opens a *preview* that walks one script in a straight line: backgrounds,
-messages with the speaker colours from `OF_ADV2.INI`, chapter titles,
-waits, sound effects and voices. Branches, variables, the shared
-functions in `pmail.obj` (character sprites, music) and menus come with
-the interpreter.
+**Pure Mail today:** the game boots like the original (`pmail.obj` +
+`start.obj`) and runs its compiled scripts on a reimplementation of the
+engine's script machine: variables, expressions, calls into the shared
+functions of `pmail.obj`, branches and script changes all work (an
+automated walk covers the whole game without a machine error). Implemented
+on the engine side: the title menu, messages with speaker colours and
+voices, choices, backgrounds, character sprites, colour fills,
+cross-fades, waits, music, sound effects and voices. Still missing: the
+in-game PC (chat and mail windows), save/load, the backlog, settings and
+several effects; engine functions that are not implemented are skipped and
+reported once on the console.
 
 ### Fonts
 

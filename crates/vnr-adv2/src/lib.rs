@@ -2,19 +2,18 @@
 //!
 //! Data formats are read through the `overflow-adv2` crate from VNTools-rs.
 //!
-//! The script interpreter is not written yet; launching a game opens a
-//! [`preview::Preview`] of one script.
+//! Launching a game boots it on the script machine ([`vm`]), with the
+//! engine functions implemented in [`game`].
 
+pub mod assets;
+pub mod game;
 pub mod ini;
-pub mod preview;
+pub mod vm;
 
 use std::path::Path;
 
 use overflow_adv2::Pack;
 use vnr_core::{App, Backend, BackendError, GameInfo, LaunchOptions, find_ci, resolve_ci};
-
-/// Script the preview starts with when none is given (the prologue).
-pub const DEFAULT_ENTRY: &str = "PRO1";
 
 /// Packs the engine loads, in the order they are reported.
 pub const PACKS: [&str; 4] = ["SCRIPT.DAT", "GRAPHIC.DAT", "SOUND.DAT", "VOICE.DAT"];
@@ -82,10 +81,13 @@ impl Backend for Adv2 {
         game: &GameInfo,
         options: &LaunchOptions,
     ) -> Result<Box<dyn App>, BackendError> {
-        let entry = options.entry.as_deref().unwrap_or(DEFAULT_ENTRY);
-        let preview =
-            preview::Preview::new(&game.root, game.title.clone(), entry, options.font.clone())?;
-        Ok(Box::new(preview))
+        let running = game::Game::new(
+            &game.root,
+            game.title.clone(),
+            options.entry.as_deref(),
+            options.font.clone(),
+        )?;
+        Ok(Box::new(running))
     }
 }
 

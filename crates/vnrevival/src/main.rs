@@ -52,6 +52,9 @@ enum Command {
         /// With --frames: click every N frames to advance the text.
         #[arg(long, requires = "frames")]
         click_every: Option<u64>,
+        /// Where --click-every clicks, as X,Y in game pixels.
+        #[arg(long, value_parser = parse_point, default_value = "0,0")]
+        click_at: (i32, i32),
     },
 }
 
@@ -76,14 +79,16 @@ fn main() -> ExitCode {
             frames,
             screenshot,
             click_every,
+            click_at,
         } => {
             let options = LaunchOptions {
                 entry: script,
                 font,
             };
+            let clicks = click_every.map(|n| (n, click_at));
             let result = match frames {
                 Some(frames) => {
-                    run_headless(&game, &options, frames, click_every, screenshot.as_deref())
+                    run_headless(&game, &options, frames, clicks, screenshot.as_deref())
                 }
                 None => run_window(&game, &options, scale),
             };
@@ -137,21 +142,23 @@ fn run_headless(
     dir: &Path,
     options: &LaunchOptions,
     frames: u64,
-    click_every: Option<u64>,
+    clicks: Option<(u64, (i32, i32))>,
     screenshot: Option<&Path>,
 ) -> Result<(), String> {
     let mut app = launch(dir, options)?;
     let mixer = Mixer::new(MIXER_CHANNELS);
-    let click = InputEvent::MouseDown {
-        button: MouseButton::Left,
-        x: 0,
-        y: 0,
-    };
-    let script: Vec<(u64, InputEvent)> = match click_every {
-        Some(n) if n > 0 => (n..frames)
-            .step_by(n as usize)
-            .map(|f| (f, click))
-            .collect(),
+    let script: Vec<(u64, InputEvent)> = match clicks {
+        Some((n, (x, y))) if n > 0 => {
+            let click = InputEvent::MouseDown {
+                button: MouseButton::Left,
+                x,
+                y,
+            };
+            (n..frames)
+                .step_by(n as usize)
+                .map(|f| (f, click))
+                .collect()
+        }
         _ => Vec::new(),
     };
     let canvas = vnr_core::run_headless(app.as_mut(), &mixer, frames, &script);
@@ -162,6 +169,15 @@ fn run_headless(
         println!("saved {}", path.display());
     }
     Ok(())
+}
+
+/// Parses `X,Y`.
+fn parse_point(text: &str) -> Result<(i32, i32), String> {
+    let (x, y) = text
+        .split_once(',')
+        .ok_or_else(|| format!("expected X,Y, got {text:?}"))?;
+    let parse = |v: &str| v.trim().parse::<i32>().map_err(|e| format!("{v:?}: {e}"));
+    Ok((parse(x)?, parse(y)?))
 }
 
 fn detect(dir: &Path) -> Result<Option<GameInfo>, String> {
