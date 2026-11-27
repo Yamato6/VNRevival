@@ -68,8 +68,9 @@ cargo run --release -- run "<game dir>"    # play
 | `--click-every N` | with `--frames`: click every N frames |
 | `--click-at X,Y` | where those clicks land, in 1280 × 720 interface pixels (default `0,0`) |
 
-A game opens on VNRevival's main menu (new game, load, settings, quit);
-the settings can switch to the game's own title screen instead.
+A game opens on VNRevival's main menu (new game, load, extras,
+settings, quit); the settings can switch to the game's own title screen
+instead.
 
 In a game: click, Enter or Space advance the text, Ctrl skips, the middle
 button hides the message window. Escape or right-click open the pause
@@ -107,6 +108,24 @@ files in
 `~/.local/share/vnrevival/saves/<game>` elsewhere (or under `--saves`).
 They are VNRevival's own format: saves made with the original game are
 not read.
+
+### Extras
+
+The extras screen has three tabs:
+
+* **CG gallery**: every event picture, as thumbnails; a picture opens
+  full screen and a click (or →) shows its next variant.
+* **Music**: every track; click one to play it, again to stop.
+* **Scenes**: the game's scene replay list; a scene plays from its start
+  and returns to the list when it ends.
+
+Only what you have seen or heard is open, unless "Unlock all extras" is
+on in the settings. For Pure Mail, the pictures and scenes use the same
+records as the original (`system.sav`, imported from the original's
+`SAVE/SAVEFL99.SAV` the first time), so progress made with the original
+counts; music heard is VNRevival's own record (`music.json`). The first
+scene is the opening movie, which ends at once until video is
+supported.
 
 ### Settings
 
@@ -178,8 +197,8 @@ overflow-adv2 = { path = "../VNTools-rs/overflow-adv2" }
    `pmail.obj` functions, the engine's `sys` calls), choices, the in-game
    PC. To do: the remaining engine functions and effects.
 4. Universal interface. Done: main menu, pause menu, save slots, history,
-   settings, interface languages. To do: CG gallery, music room, scene
-   replay, a game library with a folder picker, text input for names,
+   settings, interface languages, CG gallery, music room, scene replay.
+   To do: a game library with a folder picker, text input for names,
    a user manual.
 5. Video (Indeo 5 movies), mods and translations.
 6. More engines.

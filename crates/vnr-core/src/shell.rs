@@ -4,18 +4,25 @@
 //! [`ui::WIDTH`] × [`ui::HEIGHT`], shows the game's own screen scaled to
 //! fit (with bands at the sides when the aspect ratios differ) and owns
 //! everything that is not the game itself: the main menu, the pause menu,
-//! saving and loading, the history and the settings. The game is a
-//! [`Session`] provided by its backend.
+//! saving and loading, the history, the settings and the extras (CG
+//! gallery, music room, scene replay). The game is a [`Session`]
+//! provided by its backend.
 //!
 //! In a game, Escape or the right mouse button open the pause menu; F2
 //! saves, F3 loads, F4 opens the settings and the wheel (up) or Page Up
 //! open the history.
 
+mod extras;
+
+pub use extras::MUSIC_CHANNEL;
+
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::app::{App, Flow, Frame, InputEvent, Key, MouseButton};
 use crate::audio::Mixer;
-use crate::gfx::{Canvas, Color};
+use crate::gfx::{Canvas, Color, Sprite};
 use crate::lang::{Language, Strings};
 use crate::saves::{SLOTS, SlotSummary, Slots};
 use crate::session::{HistoryEntry, Session, SessionEvent, Start};
@@ -206,6 +213,8 @@ enum Screen {
         tab: usize,
         focus: Option<usize>,
     },
+    Extras(extras::Extras),
+    Viewer(extras::Viewer),
 }
 
 /// What a screen asks for after its input.
@@ -240,6 +249,12 @@ pub struct Shell {
     mixer: Option<Mixer>,
     window: Option<WindowRequest>,
     quit: bool,
+    /// Whether the game has any extras.
+    extras: bool,
+    /// Extras thumbnails loaded so far.
+    thumbs: HashMap<extras::ThumbKey, Option<Arc<Sprite>>>,
+    /// A scene of the extras is being replayed.
+    replaying: bool,
 }
 
 /// History layout.
@@ -260,8 +275,15 @@ impl Shell {
         let lang_dir = options.data_dir.as_ref().map(|d| d.join("lang"));
         let strings = Strings::new(settings.language, lang_dir.as_deref());
         let (w, h) = session.resolution();
+        let mut session = session;
+        let extras = !(session.gallery().is_empty()
+            && session.tracks().is_empty()
+            && session.scenes().is_empty());
         Self {
             session,
+            extras,
+            thumbs: HashMap::new(),
+            replaying: false,
             game: Canvas::new(w, h),
             game_frame: 0,
             started: false,
@@ -369,6 +391,7 @@ impl Shell {
 
     fn start(&mut self, start: Start) {
         self.session.silence();
+        self.replaying = matches!(start, Start::Scene(_));
         match self.session.start(start) {
             Ok(()) => {
                 self.in_game = true;
@@ -384,6 +407,10 @@ impl Shell {
 
     fn back_to_menu(&mut self) {
         self.session.silence();
+        if self.replaying {
+            self.end_replay();
+            return;
+        }
         if self.settings.start == StartScreen::Original && self.in_game {
             // The game's own title is the menu.
             self.start(Start::OriginalTitle);
@@ -391,6 +418,15 @@ impl Shell {
         }
         self.in_game = false;
         self.screens = vec![Screen::MainMenu { focus: None }];
+    }
+
+    /// Back to the scene list after a replayed scene.
+    fn end_replay(&mut self) {
+        self.replaying = false;
+        self.in_game = false;
+        self.session.silence();
+        let list = self.extras_screen(false, extras::SCENES);
+        self.screens = vec![Screen::MainMenu { focus: None }, list];
     }
 
     fn slots_screen(&self, saving: bool, requested: bool) -> Screen {
@@ -453,7 +489,7 @@ impl Shell {
     }
 
     fn can_save(&self) -> bool {
-        self.in_game && self.slots.is_some() && self.session.can_save()
+        self.in_game && !self.replaying && self.slots.is_some() && self.session.can_save()
     }
 
     /// Runs one game frame with the input translated to game pixels.
@@ -486,6 +522,7 @@ impl Shell {
         self.game_frame += 1;
         match event {
             SessionEvent::Continue => {}
+            SessionEvent::ToMenu if self.replaying => self.end_replay(),
             SessionEvent::ToMenu => {
                 self.in_game = false;
                 self.session.silence();
@@ -495,7 +532,10 @@ impl Shell {
                 let screen = self.slots_screen(false, true);
                 self.screens.push(screen);
             }
-            // The extras are not part of the interface yet.
+            SessionEvent::OpenExtras if self.extras => {
+                let screen = self.extras_screen(true, extras::GALLERY);
+                self.screens.push(screen);
+            }
             SessionEvent::OpenExtras => self.session.dismissed(),
             SessionEvent::Quit => self.quit = true,
         }
@@ -537,11 +577,12 @@ impl Shell {
         match action {
             Action::Push(screen) => self.screens.push(screen),
             Action::Close => {
-                if let Some(Screen::Slots {
-                    requested: true, ..
-                }) = self.screens.pop()
-                {
-                    self.session.dismissed();
+                match self.screens.pop() {
+                    Some(Screen::Slots {
+                        requested: true, ..
+                    }) => self.session.dismissed(),
+                    Some(Screen::Extras(ex)) if ex.requested => self.session.dismissed(),
+                    _ => {}
                 }
                 if self.screens.is_empty() && !self.in_game {
                     self.screens.push(Screen::MainMenu { focus: None });
@@ -606,6 +647,8 @@ impl Shell {
             )
         };
         match screen {
+            Screen::Extras(ex) => return self.extras_input(ex, input),
+            Screen::Viewer(v) => return self.viewer_input(v, input),
             Screen::MainMenu { focus } => {
                 let rects = menu_rects();
                 for event in input {
@@ -614,6 +657,9 @@ impl Shell {
                         actions.push(match MENU_ITEMS[i] {
                             "menu.start" => Action::Start(Start::NewGame),
                             "menu.load" => Action::Push(self.slots_screen(false, false)),
+                            "menu.extras" => {
+                                Action::Push(self.extras_screen(false, extras::GALLERY))
+                            }
                             "menu.settings" => Action::Push(Screen::Settings {
                                 tab: 0,
                                 focus: None,
@@ -792,7 +838,8 @@ impl Shell {
     fn menu_enabled(&self, i: usize) -> bool {
         match MENU_ITEMS[i] {
             "menu.load" => self.slots.is_some(),
-            "menu.extras" | "menu.library" => false,
+            "menu.extras" => self.extras,
+            "menu.library" => false,
             _ => true,
         }
     }
@@ -826,6 +873,8 @@ impl Shell {
     fn draw_screen(&mut self, canvas: &mut Canvas, screen: &Screen) {
         let mouse = self.mouse;
         match screen {
+            Screen::Extras(ex) => self.draw_extras(canvas, ex),
+            Screen::Viewer(v) => self.draw_viewer(canvas, v),
             Screen::MainMenu { focus } => {
                 let title = self.session.title();
                 let f = &mut self.font;
@@ -1276,7 +1325,8 @@ mod tests {
         started: Vec<Start>,
         loaded: Option<SaveData>,
         dismissed: bool,
-        ask_load: bool,
+        /// What the next frame returns.
+        next: Option<SessionEvent>,
     }
 
     /// A game that records what it is told.
@@ -1306,11 +1356,7 @@ mod tests {
                 }
             }
             frame.canvas.clear(Color::rgb(200, 0, 0));
-            if std::mem::take(&mut log.ask_load) {
-                SessionEvent::OpenLoad
-            } else {
-                SessionEvent::Continue
-            }
+            log.next.take().unwrap_or(SessionEvent::Continue)
         }
 
         fn can_save(&self) -> bool {
@@ -1339,6 +1385,26 @@ mod tests {
                 speaker: Some("A".into()),
                 text: "line".into(),
                 voice: None,
+            }]
+        }
+
+        fn gallery(&mut self) -> Vec<crate::session::GalleryEntry> {
+            vec![
+                crate::session::GalleryEntry {
+                    variants: vec![false, true],
+                },
+                crate::session::GalleryEntry {
+                    variants: vec![false],
+                },
+            ]
+        }
+
+        fn scenes(&mut self) -> Vec<crate::session::ReplayScene> {
+            vec![crate::session::ReplayScene {
+                id: "s1".into(),
+                title: "01".into(),
+                group: "A".into(),
+                unlocked: true,
             }]
         }
     }
@@ -1469,7 +1535,7 @@ mod tests {
         assert_eq!(log.borrow().loaded.as_ref().unwrap().chapter, "One");
 
         // The game's own load request: closing it tells the game.
-        log.borrow_mut().ask_load = true;
+        log.borrow_mut().next = Some(SessionEvent::OpenLoad);
         step(&mut shell, &mixer, &mut canvas, &[]);
         assert!(matches!(
             shell.screens.last(),
@@ -1521,5 +1587,100 @@ mod tests {
         );
         assert_eq!(flow, Flow::Quit);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn extras_open_only_what_was_seen() {
+        let Some(font) = font() else {
+            eprintln!("no font, skipping");
+            return;
+        };
+        let game = Counter::default();
+        let log = game.0.clone();
+        let mut shell = Shell::new(Box::new(game), font, ShellOptions::default());
+        let mixer = Mixer::new(1);
+        let mut canvas = Canvas::new(ui::WIDTH, ui::HEIGHT);
+        step(&mut shell, &mixer, &mut canvas, &[]);
+        let extras = menu_rects()[2];
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(extras.x + 5, extras.y + 5)],
+        );
+        let Some(Screen::Extras(ex)) = shell.screens.last() else {
+            panic!("the extras did not open");
+        };
+        let items = ex.items();
+        let (seen, locked) = (items[0].1, items[1].1);
+
+        // A locked picture does nothing; a seen one opens on its seen
+        // variant only.
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(locked.x + 5, locked.y + 5)],
+        );
+        assert!(matches!(shell.screens.last(), Some(Screen::Extras(_))));
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(seen.x + 5, seen.y + 5)],
+        );
+        let Some(Screen::Viewer(v)) = shell.screens.last() else {
+            panic!("the viewer did not open");
+        };
+        assert_eq!(v.variants(), [1]);
+        step(&mut shell, &mixer, &mut canvas, &[click(5, 5)]);
+        assert!(matches!(shell.screens.last(), Some(Screen::Extras(_))));
+
+        // "Unlock all" opens everything.
+        let mut settings = shell.settings().clone();
+        settings.unlock_all = true;
+        shell.set_settings(settings);
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(locked.x + 5, locked.y + 5)],
+        );
+        assert!(matches!(shell.screens.last(), Some(Screen::Viewer(_))));
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[InputEvent::KeyDown(Key::Escape)],
+        );
+
+        // A scene plays, and its end goes back to the scene list.
+        let scenes = tab_rect(extras::SCENES);
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(scenes.x + 5, scenes.y + 5)],
+        );
+        let Some(Screen::Extras(ex)) = shell.screens.last() else {
+            panic!("the extras closed");
+        };
+        let scene = ex.items()[0].1;
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(scene.x + 5, scene.y + 5)],
+        );
+        assert!(shell.in_game());
+        assert_eq!(log.borrow().started, [Start::Scene("s1".into())]);
+        assert!(!shell.can_save());
+        log.borrow_mut().next = Some(SessionEvent::ToMenu);
+        step(&mut shell, &mixer, &mut canvas, &[]);
+        assert!(!shell.in_game());
+        let Some(Screen::Extras(ex)) = shell.screens.last() else {
+            panic!("not back at the scene list");
+        };
+        assert_eq!(ex.tab(), extras::SCENES);
     }
 }

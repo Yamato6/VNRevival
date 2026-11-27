@@ -131,6 +131,29 @@ impl Assets {
         load_clip(self.sound.as_mut()?, name)
     }
 
+    /// Numbers of the music tracks (`MM%03d`) in `SOUND.DAT`, in order.
+    pub fn music_tracks(&self) -> Vec<i32> {
+        let Some(pack) = &self.sound else {
+            return Vec::new();
+        };
+        let mut tracks: Vec<i32> = pack
+            .entries()
+            .iter()
+            .filter_map(|e| {
+                let name = e.name.to_ascii_lowercase();
+                let (stem, ext) = name.rsplit_once('.')?;
+                let digits = stem.strip_prefix("mm")?;
+                (matches!(ext, "adps" | "adp4")
+                    && digits.len() == 3
+                    && digits.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| digits.parse().ok())?
+            })
+            .collect();
+        tracks.sort_unstable();
+        tracks.dedup();
+        tracks
+    }
+
     /// A voice from `VOICE.DAT`.
     pub fn voice(&mut self, name: &str) -> Option<Arc<Clip>> {
         load_clip(self.voice.as_mut()?, name)

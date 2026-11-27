@@ -28,7 +28,9 @@ pub mod ui;
 pub use app::{App, FPS, Flow, Frame, InputEvent, Key, MouseButton, run_headless};
 pub use audio::{Clip, FULL_VOLUME, Mixer};
 pub use gfx::{Canvas, Color, Sprite};
-pub use session::{HistoryEntry, SaveData, Session, SessionEvent, Start};
+pub use session::{
+    GalleryEntry, HistoryEntry, ReplayScene, SaveData, Session, SessionEvent, Start, Track,
+};
 pub use settings::Settings;
 pub use text::{Font, FontFamily, TextStyle};
 

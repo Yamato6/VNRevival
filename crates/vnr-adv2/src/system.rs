@@ -13,7 +13,11 @@
 //! | `0xC00 + n` | scene `n` of the replay list ([`SCENES`]) unlocked | `sys d7` (`0x42af80`) |
 //! | `0x129 + n` | ending `n` seen | end of `sys d3` (`0x411b74`) |
 //! | `0x180 + i`, `0x200 + 20·i + j` | gallery picture `i` (below 128) and its variant `j` seen | `sys 30` showing it (`0x408bc0`) |
+//!
+//! The original has no record of the music heard; VNRevival keeps one in
+//! `music.json` ([`HeardTracks`]) for its music room.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -32,6 +36,59 @@ pub const SCENES: [&str; 32] = [
     "saku01", "yuzu00", "yuzu01", "tohk00", "tohk01", "tohk02", "tohk03", "nana00", "rinn00",
     "rinn01", "rinn02", "rinn03", "rinn04", "yuzu02",
 ];
+
+/// Thumbnail (`.cgm`) and group of each scene of [`SCENES`], from the
+/// same table (`0x44ffb8`, entries of `0x114` bytes: group, thumbnail,
+/// script).
+pub const SCENE_INFO: [(u8, &str); 32] = [
+    (2, "open00"),
+    (3, "hiro13_11"),
+    (3, "hiro03_1"),
+    (3, "hiro27"),
+    (3, "hiro13_21"),
+    (3, "hiro21"),
+    (3, "hiro28"),
+    (3, "hiro19_1"),
+    (3, "hiro22_3"),
+    (3, "hiro15_1"),
+    (4, "mika11_1"),
+    (4, "mika04"),
+    (4, "mika04"),
+    (4, "mika04_1"),
+    (4, "mika04_1"),
+    (4, "mika07_11"),
+    (4, "mika15"),
+    (5, "saku04"),
+    (5, "saku05_21"),
+    (6, "yuzu05_41"),
+    (6, "yuzu06_11"),
+    (7, "tohk11"),
+    (7, "tohk03_1"),
+    (7, "tohk03_1"),
+    (7, "tohk07_1"),
+    (8, "nana01_1"),
+    (9, "RINN05_1"),
+    (9, "RINN06_1"),
+    (9, "RINN12_1"),
+    (9, "RINN08_1"),
+    (9, "RINN08_1"),
+    (6, "yuzu07_11"),
+];
+
+/// Name of a scene group: the prefix its pictures and scripts share.
+pub fn group_name(group: u8) -> &'static str {
+    match group {
+        2 => "OPEN",
+        3 => "HIRO",
+        4 => "MIKA",
+        5 => "SAKU",
+        6 => "YUZU",
+        7 => "TOHK",
+        8 => "NANA",
+        9 => "RINN",
+        _ => "",
+    }
+}
 
 /// The gallery: one entry per picture, listing its variants (table at
 /// `0x43a11c`). Showing any of these pictures marks it seen.
@@ -340,6 +397,46 @@ impl SystemData {
         fs::rename(&temp, path)?;
         self.dirty = false;
         Ok(())
+    }
+}
+
+/// Music tracks heard (`MM%03d` numbers), kept as a JSON list.
+#[derive(Debug, Clone, Default)]
+pub struct HeardTracks {
+    tracks: BTreeSet<i32>,
+    path: Option<PathBuf>,
+}
+
+impl HeardTracks {
+    /// Reads `path`; empty if it is missing or unreadable.
+    pub fn open(path: PathBuf) -> Self {
+        let tracks = fs::read(&path)
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default();
+        Self {
+            tracks,
+            path: Some(path),
+        }
+    }
+
+    pub fn heard(&self, track: i32) -> bool {
+        self.tracks.contains(&track)
+    }
+
+    /// Records a track; written at once when it is new.
+    pub fn hear(&mut self, track: i32) -> io::Result<()> {
+        if !self.tracks.insert(track) {
+            return Ok(());
+        }
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let json = serde_json::to_vec(&self.tracks).map_err(io::Error::other)?;
+        fs::write(path, json)
     }
 }
 

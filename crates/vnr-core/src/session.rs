@@ -6,7 +6,11 @@
 //! [`Shell`](crate::shell::Shell), which talks to the game through the
 //! [`Session`] trait.
 
+use std::sync::Arc;
+
 use crate::app::Frame;
+use crate::audio::Clip;
+use crate::gfx::Sprite;
 use crate::settings::Settings;
 
 /// How to begin a game.
@@ -56,7 +60,42 @@ pub struct HistoryEntry {
     pub voice: Option<String>,
 }
 
+/// One picture of the gallery (CG), with its variants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GalleryEntry {
+    /// Whether each variant has been seen.
+    pub variants: Vec<bool>,
+}
+
+impl GalleryEntry {
+    /// Seen at least in one variant.
+    pub fn seen(&self) -> bool {
+        self.variants.iter().any(|&v| v)
+    }
+}
+
+/// One music track.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Track {
+    pub title: String,
+    pub heard: bool,
+}
+
+/// One scene that can be replayed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayScene {
+    /// What [`Start::Scene`] takes.
+    pub id: String,
+    pub title: String,
+    /// Heading the scene is listed under (a route, a heroine).
+    pub group: String,
+    pub unlocked: bool,
+}
+
 /// A running game.
+///
+/// The extras (gallery, music, scenes) are optional: a game without them
+/// keeps the default methods, and the interface hides what is empty.
 pub trait Session {
     /// Window title.
     fn title(&self) -> String;
@@ -97,4 +136,41 @@ pub trait Session {
 
     /// Stops all sound (when leaving the game for the menu).
     fn silence(&mut self) {}
+
+    /// The gallery.
+    fn gallery(&mut self) -> Vec<GalleryEntry> {
+        Vec::new()
+    }
+
+    /// A small picture for gallery entry `index`.
+    fn gallery_thumbnail(&mut self, _index: usize) -> Option<Arc<Sprite>> {
+        None
+    }
+
+    /// Variant `variant` of gallery entry `index`, at the game's
+    /// resolution.
+    fn gallery_picture(&mut self, _index: usize, _variant: usize) -> Option<Arc<Sprite>> {
+        None
+    }
+
+    /// The music tracks.
+    fn tracks(&mut self) -> Vec<Track> {
+        Vec::new()
+    }
+
+    /// Track `index`, to be played by the interface.
+    fn track(&mut self, _index: usize) -> Option<Arc<Clip>> {
+        None
+    }
+
+    /// The scenes that can be replayed with [`Start::Scene`]. A replayed
+    /// scene ends with [`SessionEvent::ToMenu`].
+    fn scenes(&mut self) -> Vec<ReplayScene> {
+        Vec::new()
+    }
+
+    /// A small picture for scene `index`.
+    fn scene_thumbnail(&mut self, _index: usize) -> Option<Arc<Sprite>> {
+        None
+    }
 }

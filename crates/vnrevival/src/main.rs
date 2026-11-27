@@ -248,6 +248,13 @@ mod tests {
             ..LaunchOptions::default()
         };
         let (_, session) = open(Path::new(&dir), &options).unwrap();
+        // Show every extra, seen or not.
+        std::fs::create_dir_all(scratch.join("data")).unwrap();
+        std::fs::write(
+            scratch.join("data/settings.json"),
+            r#"{"unlock_all": true}"#,
+        )
+        .unwrap();
         let Ok(font) = vnr_core::shell::load_font(None) else {
             eprintln!("no font, skipping");
             return;
@@ -301,6 +308,28 @@ mod tests {
             vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, key(Key::Escape))]);
             assert!(shell.in_game(), "{name} did not close");
         }
+
+        // Main menu (pause, 6th item), then the extras.
+        vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, key(Key::Escape))]);
+        vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, click(600, 500))]);
+        assert!(!shell.in_game());
+        for (name, x, y) in [
+            ("gallery", 600, 390),
+            ("viewer", 150, 250),
+            ("viewer-next", 640, 360),
+        ] {
+            let canvas = vnr_core::run_headless(&mut shell, &mixer, 2, &[(0, click(x, y))]);
+            shoot(&canvas, name);
+        }
+        vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, key(Key::Escape))]);
+        for (name, x) in [("music", 500), ("scenes", 700)] {
+            let canvas = vnr_core::run_headless(&mut shell, &mixer, 2, &[(0, click(x, 160))]);
+            shoot(&canvas, name);
+        }
+        // Replay the second scene (the first is the opening movie).
+        let canvas = vnr_core::run_headless(&mut shell, &mixer, 300, &[(0, click(334, 250))]);
+        assert!(shell.in_game());
+        shoot(&canvas, "replay");
         let _ = std::fs::remove_dir_all(scratch);
     }
 }

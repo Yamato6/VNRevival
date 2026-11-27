@@ -46,9 +46,9 @@ use std::sync::Arc;
 use vnr_core::settings::StartScreen;
 use vnr_core::text::find_system_font;
 use vnr_core::{
-    BackendError, Canvas, Color, Font, FontFamily, Frame, HistoryEntry, InputEvent, Key, Mixer,
-    MouseButton, SaveData, Session, SessionEvent, Settings as PlayerSettings, Sprite, Start,
-    TextStyle,
+    BackendError, Canvas, Clip, Color, Font, FontFamily, Frame, GalleryEntry, HistoryEntry,
+    InputEvent, Key, Mixer, MouseButton, ReplayScene, SaveData, Session, SessionEvent,
+    Settings as PlayerSettings, Sprite, Start, TextStyle, Track,
 };
 
 use crate::assets::Assets;
@@ -58,7 +58,7 @@ use crate::names::Names;
 use crate::options::GameOptions;
 use crate::pc::{self, Label, Line, Mail, PcView, Popup};
 use crate::save::{self, EngineState, SaveFile, SavedMode, SceneState};
-use crate::system::SystemData;
+use crate::system::{self, HeardTracks, SystemData};
 use crate::transition::{self, Effect, MorningPictures, Transition};
 use crate::vm::{Control, Host, Machine, Status, Value};
 
@@ -84,6 +84,8 @@ const STEP_BUDGET: usize = 200_000;
 const TEXT_SIZE: f32 = 22.0;
 const LINE_HEIGHT: f32 = 30.0;
 const BOX: (i32, i32, u32, u32) = (20, 424, 760, 166);
+/// Background picture formats: `.crgb`, and one `.dib` (`hiro17`).
+const BACKGROUND: &[&str] = &["crgb", "dib"];
 
 struct Fonts {
     mincho: Font,
@@ -255,6 +257,11 @@ pub struct Engine {
     player: PlayerSettings,
     /// This game's own options.
     options: GameOptions,
+    /// Music heard, for the music room.
+    heard: HeardTracks,
+    /// Replaying a scene of the extras: going back to the extras script
+    /// ends it.
+    replay: bool,
     /// Fraction of a character of text still to reveal.
     reveal: f32,
 }
@@ -302,6 +309,9 @@ impl Engine {
         self.music = track;
         match track {
             Some(track) => {
+                if let Err(e) = self.heard.hear(track) {
+                    eprintln!("could not save the music heard: {e}");
+                }
                 let clip = self.assets.sound(&format!("mm{track:03}"));
                 self.play(CHANNEL_MUSIC, clip);
             }
@@ -357,6 +367,7 @@ impl Engine {
         self.music = None;
         self.event = None;
         self.fast_start = false;
+        self.replay = false;
         self.history = History::default();
         self.names = self.options.names.clone();
         self.reveal = 0.0;
@@ -554,6 +565,13 @@ impl Host for Engine {
             }
             0x10 => {
                 let name = text(0);
+                let stem = name.to_ascii_lowercase();
+                if self.replay && (stem.starts_with("extra.") || stem.starts_with("start.")) {
+                    self.stop_all();
+                    self.event = Some(SessionEvent::ToMenu);
+                    self.mode = Mode::Paused;
+                    return Control::Yield;
+                }
                 match self.assets.script(&name) {
                     Ok(script) => {
                         self.script_names.insert(script.id, name);
@@ -575,7 +593,7 @@ impl Host for Engine {
             }
             0x30 => {
                 let name = text(0);
-                self.staged.background = self.assets.picture(&name, &["crgb"]);
+                self.staged.background = self.assets.picture(&name, BACKGROUND);
                 if self.system.see_picture(&name)
                     && let Err(e) = self.system.store()
                 {
@@ -882,6 +900,8 @@ pub struct Game {
     root: PathBuf,
     /// Script to start instead of `start.obj` (for testing).
     entry: Option<String>,
+    /// Music tracks in the sound pack, once listed.
+    tracks: Option<Vec<i32>>,
     vm: Machine,
     engine: Engine,
     /// Folder of the game's own data (options, system flags); `None`
@@ -936,12 +956,15 @@ impl Game {
             system: SystemData::default(),
             player: PlayerSettings::default(),
             options: GameOptions::default(),
+            heard: HeardTracks::default(),
+            replay: false,
             reveal: 0.0,
         };
         Ok(Self {
             title,
             root: root.to_path_buf(),
             entry: entry.map(str::to_string),
+            tracks: None,
             vm: Machine::new(),
             engine,
             data_dir: None,
@@ -962,6 +985,7 @@ impl Game {
             Err(e) => eprintln!("could not read the system data: {e}"),
         }
         self.engine.options = GameOptions::load(dir);
+        self.engine.heard = HeardTracks::open(dir.join("music.json"));
     }
 
     /// Loads the scripts and starts `script` from a clean state.
@@ -1092,7 +1116,7 @@ impl Game {
             ..Scene::default()
         };
         if let Some(name) = state.scene.background {
-            scene.background = e.assets.picture(&name, &["crgb"]);
+            scene.background = e.assets.picture(&name, BACKGROUND);
             scene.background_name = Some(name);
         }
         for (slot, name) in state.scene.characters {
@@ -1435,7 +1459,15 @@ impl Session for Game {
                 Ok(())
             }
             Start::OriginalTitle => self.boot("start"),
-            Start::Scene(_) => Err("scene replay is not available yet".into()),
+            Start::Scene(id) => {
+                let known = system::SCENES.iter().any(|s| s.eq_ignore_ascii_case(&id));
+                if !known {
+                    return Err(format!("{id} is not a scene of the replay list"));
+                }
+                self.boot(&id)?;
+                self.engine.replay = true;
+                Ok(())
+            }
         }
     }
 
@@ -1543,6 +1575,82 @@ impl Session for Game {
 
     fn silence(&mut self) {
         self.engine.stop_all();
+    }
+
+    fn gallery(&mut self) -> Vec<GalleryEntry> {
+        let system = &self.engine.system;
+        system::GALLERY
+            .iter()
+            .enumerate()
+            .map(|(i, variants)| GalleryEntry {
+                variants: (0..variants.len())
+                    .map(|k| {
+                        system.variant_seen(i, k + 1)
+                            || (k == 0 && system.picture_seen(i) && variants.len() == 1)
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    fn gallery_thumbnail(&mut self, index: usize) -> Option<Arc<Sprite>> {
+        let variants = system::GALLERY.get(index)?;
+        let assets = &mut self.engine.assets;
+        variants
+            .iter()
+            .find_map(|name| assets.picture(name, &["cgm"]))
+            .or_else(|| assets.picture(variants.first()?, BACKGROUND))
+    }
+
+    fn gallery_picture(&mut self, index: usize, variant: usize) -> Option<Arc<Sprite>> {
+        let name = system::GALLERY.get(index)?.get(variant)?;
+        self.engine.assets.picture(name, BACKGROUND)
+    }
+
+    fn tracks(&mut self) -> Vec<Track> {
+        let tracks = self
+            .tracks
+            .get_or_insert_with(|| self.engine.assets.music_tracks());
+        tracks
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| Track {
+                title: format!("Track {:02}", i + 1),
+                heard: self.engine.heard.heard(n),
+            })
+            .collect()
+    }
+
+    fn track(&mut self, index: usize) -> Option<Arc<Clip>> {
+        let n = *self.tracks.as_ref()?.get(index)?;
+        self.engine.assets.sound(&format!("mm{n:03}"))
+    }
+
+    fn scenes(&mut self) -> Vec<ReplayScene> {
+        let mut counts = std::collections::HashMap::new();
+        system::SCENES
+            .iter()
+            .zip(system::SCENE_INFO)
+            .enumerate()
+            .map(|(i, (script, (group, _)))| {
+                let n = counts.entry(group).or_insert(0);
+                *n += 1;
+                ReplayScene {
+                    id: script.to_string(),
+                    title: format!("{n:02}"),
+                    group: system::group_name(group).to_string(),
+                    unlocked: self.engine.system.scene_unlocked(i),
+                }
+            })
+            .collect()
+    }
+
+    fn scene_thumbnail(&mut self, index: usize) -> Option<Arc<Sprite>> {
+        let (_, name) = system::SCENE_INFO.get(index)?;
+        let assets = &mut self.engine.assets;
+        assets
+            .picture(name, &["cgm"])
+            .or_else(|| assets.picture(name, BACKGROUND))
     }
 }
 
@@ -1882,5 +1990,54 @@ mod tests {
         assert_eq!(game.engine.chapter, "プロローグ");
         let lit = canvas.rgba().chunks_exact(4).filter(|p| p[0] > 128).count();
         assert!(lit > 500, "only {lit} bright pixels");
+    }
+
+    /// The extras: every scene and gallery entry has a thumbnail, the
+    /// music decodes, and a replayed scene ends by asking for the menu
+    /// (needs `ADV2_GAME_DIR`).
+    #[test]
+    fn extras_and_scene_replay() {
+        let Some(mut game) = open(None) else {
+            eprintln!("ADV2_GAME_DIR not set or no font, skipping");
+            return;
+        };
+        assert_eq!(game.gallery().len(), system::GALLERY.len());
+        for i in 0..system::GALLERY.len() {
+            assert!(game.gallery_thumbnail(i).is_some(), "gallery {i}");
+            assert!(game.gallery_picture(i, 0).is_some(), "gallery {i}");
+        }
+        let scenes = game.scenes();
+        assert_eq!(scenes.len(), 32);
+        for (i, scene) in scenes.iter().enumerate() {
+            let thumb = game.scene_thumbnail(i).expect(&scene.id);
+            assert_eq!((thumb.width, thumb.height), (160, 120));
+        }
+        let tracks = game.tracks();
+        assert!(tracks.len() > 10, "{} tracks", tracks.len());
+        assert!(game.track(0).is_some_and(|c| c.is_looping()));
+
+        game.start(Start::Scene("hiro00".into())).unwrap();
+        let mixer = Mixer::new(CHANNELS);
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        let skip = [InputEvent::KeyDown(Key::Control)];
+        let (x, y, ..) = choice_rect(0);
+        let pick = [click_at(x + 5, y + 5)];
+        for number in 0..20_000 {
+            let input: &[InputEvent] = match number {
+                0 => &skip,
+                _ if number % 10 == 0 => &pick,
+                _ => &[],
+            };
+            let event = step(&mut game, &mixer, &mut canvas, number, input);
+            assert!(
+                !matches!(game.engine.mode, Mode::Ended(_)),
+                "{:?}",
+                game.engine.mode
+            );
+            if event == SessionEvent::ToMenu {
+                return;
+            }
+        }
+        panic!("the scene never ended");
     }
 }

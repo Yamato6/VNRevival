@@ -294,6 +294,20 @@ impl Canvas {
     /// Draws `src` stretched (bilinear) onto the rectangle `(x, y, w, h)`
     /// of this canvas, clipped to it.
     pub fn draw_scaled(&mut self, src: &Canvas, x: i32, y: i32, w: u32, h: u32) {
+        self.scale_from(&src.pixels, src.width, src.height, x, y, w, h);
+    }
+
+    /// Draws `sprite` stretched (bilinear) onto `(x, y, w, h)`, ignoring
+    /// its alpha (for opaque pictures such as gallery images).
+    pub fn draw_sprite_scaled(&mut self, sprite: &Sprite, x: i32, y: i32, w: u32, h: u32) {
+        self.scale_from(&sprite.pixels, sprite.width, sprite.height, x, y, w, h);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn scale_from(&mut self, pixels: &[u8], sw: u32, sh: u32, x: i32, y: i32, w: u32, h: u32) {
+        if sw == 0 || sh == 0 {
+            return;
+        }
         let Some((dx, dy, ox, oy, cw, ch)) = self.clip(x, y, w, h) else {
             return;
         };
@@ -307,13 +321,13 @@ impl Canvas {
             let next = (i + 1).min(src_len as usize - 1);
             (i, next, (pos & 255) as u32)
         };
-        let cols: Vec<_> = (0..cw).map(|c| map(ox + c, w, src.width)).collect();
+        let cols: Vec<_> = (0..cw).map(|c| map(ox + c, w, sw)).collect();
         let stride = self.width as usize * 4;
-        let sstride = src.width as usize * 4;
+        let sstride = sw as usize * 4;
         for r in 0..ch {
-            let (y0, y1, fy) = map(oy + r, h, src.height);
-            let row0 = &src.pixels[y0 * sstride..(y0 + 1) * sstride];
-            let row1 = &src.pixels[y1 * sstride..(y1 + 1) * sstride];
+            let (y0, y1, fy) = map(oy + r, h, sh);
+            let row0 = &pixels[y0 * sstride..(y0 + 1) * sstride];
+            let row1 = &pixels[y1 * sstride..(y1 + 1) * sstride];
             let d = (dy + r) * stride + dx * 4;
             for (dp, &(x0, x1, fx)) in self.pixels[d..d + cw * 4].chunks_exact_mut(4).zip(&cols) {
                 for c in 0..3 {
