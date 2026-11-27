@@ -1,15 +1,14 @@
 [package]
-name = "adv2-formats"
-description = "Readers for the data formats of the OverflowADV2 visual novel engine"
+name = "vnr-core"
+description = "Engine-independent core of VNRevival: backend interface and shared helpers"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+license.workspace = true
 repository.workspace = true
 
 [dependencies]
-encoding_rs.workspace = true
-thiserror.workspace = true
 
 [lints]
 workspace = true

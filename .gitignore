@@ -9,3 +9,6 @@
 *.sav
 /extracted/
 /out/
+
+# Local overrides (e.g. [patch] pointing at a VNTools-rs checkout)
+/.cargo/config.toml

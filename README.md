@@ -1,82 +1,89 @@
-# OpenADV2
+# VNRevival
 
-An open reimplementation of **OverflowADV2**, the visual novel engine behind
-early Overflow titles such as **Pure Mail** (2001). The goal is to play
-those games on modern Windows, Linux and macOS using the data files from
-your own legal copy.
+A modern, cross-platform runtime for **old visual novels** whose original
+engines no longer run well on current systems. Like ScummVM does for
+adventure games, VNRevival reads the data files of **your own legal copy**
+and plays them on Windows, Linux and macOS.
 
-OpenADV2 ships **no game data**. It only reads files from an install you
-own.
+VNRevival ships **no game data**.
 
-## Status
+## Supported engines
 
-Early research stage.
+| Engine | Games | Status |
+|---|---|---|
+| OverflowADV2 (`adv2`) | Pure Mail (2001) | Detection only; runtime not started |
 
-| Area | Status |
-|---|---|
-| Pack archives (`*.DAT`) | ✅ read, list and extract |
-| LZSS compression | ✅ |
-| Images | 🟡 `.dib` understood, other formats pending |
-| Scripts (`.obj` bytecode) | ❓ not started |
-| Audio (`.adp4` / `.adps`) | ❓ not started |
-| Video (Indeo 5 AVI) | identified, playback not started |
-| Engine runtime | ❓ not started |
+## How it fits together
 
-Format notes: [docs/FORMATS.md](docs/FORMATS.md).
+```
+VNTools-rs (format crates)      VNRevival
+┌──────────────────────┐        ┌───────────────────────────────────────┐
+│ overflow-adv2        │──────▶ │ vnr-adv2   backend: engine → runtime   │
+│   packs, LZSS, ...   │        │ vnr-core   shared runtime & Backend    │
+└──────────────────────┘        │ vnrevival  the executable              │
+                                └───────────────────────────────────────┘
+```
 
-## Building
+* **[VNTools-rs](https://github.com/Yamato6/VNTools-rs)** holds the
+  readers for each engine's file formats, plus extraction tools and the
+  reverse-engineering notes. Formats are figured out there first.
+* **`vnr-core`** is engine-independent: the [`Backend`] interface and,
+  as it gets written, the shared runtime (window, rendering, text, audio,
+  input, saves, settings).
+* **`vnr-<engine>`** crates are backends: they use the format crates to
+  turn an original engine's scripts and assets into what the runtime
+  needs.
+
+Adding a new engine means adding its format crate to VNTools-rs and a
+backend crate here; the runtime stays the same.
+
+[`Backend`]: crates/vnr-core/src/lib.rs
+
+## Usage
+
+```sh
+cargo run --release -- engines             # list supported engines
+cargo run --release -- detect "<game dir>" # identify a game install
+```
+
+## Building and testing
 
 Requires Rust 1.85 or newer.
 
 ```sh
 cargo build --release
-```
-
-## `adv2-tool`
-
-```sh
-# Summary of a pack
-adv2-tool info  "<game>/PACK/GRAPHIC.DAT"
-
-# List members (optionally filtered by name)
-adv2-tool list  "<game>/PACK/SCRIPT.DAT" --filter start
-
-# Extract members (decompressed; add --raw to keep them as stored)
-adv2-tool extract "<game>/PACK/SCRIPT.DAT" --output extracted/script
-```
-
-## Tests
-
-```sh
 cargo test
 ```
 
-Tests that need real game data are skipped unless `ADV2_GAME_DIR` points
-at the install folder (the one that contains `PACK/`):
+Tests that need real game data are skipped unless an environment variable
+points at the install, e.g. `ADV2_GAME_DIR` for Pure Mail:
 
 ```sh
-ADV2_GAME_DIR="/path/to/PMAILDVD" cargo test --release
+ADV2_GAME_DIR="/path/to/PMAILDVD" cargo test
 ```
 
-## Project layout
+### Working on VNTools-rs at the same time
 
-```
-crates/adv2-formats   library: readers for the engine's file formats
-crates/adv2-tool      command-line inspector / extractor
-docs/FORMATS.md       reverse-engineering notes
+The format crates are a git dependency. To use a local checkout instead,
+create `.cargo/config.toml` (ignored by git) with:
+
+```toml
+[patch."https://github.com/Yamato6/VNTools-rs"]
+overflow-adv2 = { path = "../VNTools-rs/overflow-adv2" }
 ```
 
 ## Roadmap
 
-1. Image formats (`.crgb`, `.char`, `.anim`, …) and a PNG export.
-2. Audio formats (`.adp4`, `.adps`) and a WAV export.
-3. Script bytecode: opcode table and a disassembler.
-4. Runtime: window, rendering, text, audio and input on SDL.
-5. Video playback, save/load, settings.
+1. OverflowADV2 formats in VNTools-rs: images, audio, script bytecode.
+2. Runtime core: window, rendering and input on SDL, text with
+   Japanese fonts, audio mixing.
+3. Pure Mail playable: script interpreter, choices, save/load, settings.
+4. Video (Indeo 5 movies), mods and translations.
+5. More engines.
 
-## Legal
+## License
 
-This is a clean reimplementation written from observed file formats and
-behaviour. It contains no code or assets from the original games. Pure Mail
-and Overflow are trademarks of their respective owners; this project is not
+[MIT](LICENSE).
+
+Game names and trademarks belong to their owners. This project is not
 affiliated with them.

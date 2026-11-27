@@ -1,0 +1,17 @@
+[package]
+name = "vnrevival"
+description = "Play old visual novels on modern systems from your own copy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vnr-core.workspace = true
+vnr-adv2.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

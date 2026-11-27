@@ -1,19 +1,22 @@
 [workspace]
 resolver = "3"
-members = ["crates/adv2-formats", "crates/adv2-tool"]
+members = ["crates/vnr-core", "crates/vnr-adv2", "crates/vnrevival"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Yamato6"]
-repository = "https://github.com/Yamato6/OpenADV2"
+license = "MIT"
+repository = "https://github.com/Yamato6/VNRevival"
 
 [workspace.dependencies]
-adv2-formats = { path = "crates/adv2-formats" }
+vnr-core = { path = "crates/vnr-core" }
+vnr-adv2 = { path = "crates/vnr-adv2" }
+# Format readers live in VNTools-rs. To work on both repos at once, see
+# "Working on VNTools-rs at the same time" in the README.
+overflow-adv2 = { git = "https://github.com/Yamato6/VNTools-rs" }
 clap = { version = "4.5", features = ["derive"] }
-encoding_rs = "0.8"
-thiserror = "2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
