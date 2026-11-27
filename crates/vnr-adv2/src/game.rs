@@ -517,7 +517,6 @@ impl Host for Engine {
             0x21 | 0x22 => {
                 let ms = num(vm, self, 0).clamp(0, 10_000) as u64;
                 if !self.skipping && ms > 0 {
-                    self.present_if_changed();
                     self.mode = Mode::Wait(self.frame + (ms * 60).div_ceil(1000));
                     return Control::Yield;
                 }
@@ -553,6 +552,11 @@ impl Host for Engine {
                         Some(pictures) => Effect::morning(mode, pictures),
                         None => Effect::Fade,
                     },
+                    4 => self
+                        .assets
+                        .gray("OVERFLOW.ALPM")
+                        .and_then(|(w, h, rule)| Effect::rule(mode, rule, w, h))
+                        .unwrap_or(Effect::Fade),
                     _ => Effect::Fade,
                 };
                 self.present(effect, step);
@@ -1750,8 +1754,8 @@ mod tests {
             x: x + 5,
             y: y + 5,
         };
-        let script: Vec<(u64, InputEvent)> = (20..600).step_by(20).map(|f| (f, load)).collect();
-        let canvas = vnr_core::run_headless(&mut booted, &mixer, 600, &script);
+        let script: Vec<(u64, InputEvent)> = (20..1500).step_by(20).map(|f| (f, load)).collect();
+        let canvas = vnr_core::run_headless(&mut booted, &mixer, 1500, &script);
         assert!(booted.menu.as_ref().is_some_and(|m| !m.saving));
         if let Some(out) = std::env::var_os("VNR_SHOT_DIR") {
             canvas

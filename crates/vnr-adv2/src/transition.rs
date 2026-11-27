@@ -21,9 +21,14 @@
 //!   `ASAFLASH.ALPA` that slides diagonally as progress grows from −256 to
 //!   128. A pixel shows `clamp(progress + rule, 0, 128) / 128` of the new
 //!   picture (the DLL's `AlpBlend4` tables).
+//! * **4**: rule wipe with `OVERFLOW.ALPM`, a full-size rule of light rays
+//!   (`0x40ef60`, the DLL's `AlpBlend`; same flags, range and formula).
+//!   The publisher logo at start-up uses it.
+//! * **9**: shown as the cross-fade; the original's start-up notices
+//!   (the only place it is used) look and time like one.
 //!
-//! Types 2, 4, 7 and 9 (ten calls in the whole game) fall back to the
-//! cross-fade for now; 5, 6 and 8 are never used.
+//! Types 2 and 7 (six calls) fall back to the cross-fade for now; 5, 6
+//! and 8 are never used.
 
 use std::sync::Arc;
 
@@ -40,6 +45,8 @@ const RULE_W: usize = 200;
 const RULE_H: usize = 150;
 const FLASH_W: usize = 250;
 const FLASH_H: usize = 200;
+const SCREEN_W: usize = 800;
+const SCREEN_H: usize = 600;
 
 /// Progress step for a speed argument; unknown speeds use the default
 /// (as the jump table does).
@@ -70,6 +77,23 @@ pub enum Effect {
         rule: Vec<u8>,
         pictures: Arc<MorningPictures>,
     },
+    /// A full-size rule (800 × 600), mirrored/inverted as asked.
+    Rule(Vec<u8>),
+}
+
+/// Applies the `sys 40` mode flags to a rule `width` values wide:
+/// `0x400` mirrors it, `0x800` inverts it (`0x80 - value`).
+fn apply_flags(rule: &mut [u8], width: usize, mode: i32) {
+    if mode & 0x400 != 0 {
+        for row in rule.chunks_exact_mut(width) {
+            row.reverse();
+        }
+    }
+    if mode & 0x800 != 0 {
+        for v in rule {
+            *v = 0x80u8.wrapping_sub(*v);
+        }
+    }
 }
 
 impl Effect {
@@ -78,23 +102,25 @@ impl Effect {
         match self {
             Effect::Cut => (0, 0),
             Effect::Fade => (0, 256),
-            Effect::Morning { .. } => (-256, 128),
+            Effect::Morning { .. } | Effect::Rule(_) => (-256, 128),
         }
+    }
+
+    /// A full-size rule wipe with the mode flags of `sys 40`; `None`
+    /// unless `rule` is 800 × 600.
+    pub fn rule(mode: i32, mut rule: Vec<u8>, width: u32, height: u32) -> Option<Self> {
+        let size = (width as usize, height as usize);
+        if size != (SCREEN_W, SCREEN_H) || rule.len() != SCREEN_W * SCREEN_H {
+            return None;
+        }
+        apply_flags(&mut rule, SCREEN_W, mode);
+        Some(Effect::Rule(rule))
     }
 
     /// The morning effect with the mode flags of `sys 40`.
     pub fn morning(mode: i32, pictures: Arc<MorningPictures>) -> Self {
         let mut rule = pictures.base.clone();
-        if mode & 0x400 != 0 {
-            for row in rule.chunks_exact_mut(RULE_W) {
-                row.reverse();
-            }
-        }
-        if mode & 0x800 != 0 {
-            for v in &mut rule {
-                *v = 0x80u8.wrapping_sub(*v);
-            }
-        }
+        apply_flags(&mut rule, RULE_W, mode);
         Effect::Morning { rule, pictures }
     }
 }
@@ -166,6 +192,12 @@ impl Transition {
                         map[(y as usize / 4).min(RULE_H - 1) * RULE_W
                             + (x as usize / 4).min(RULE_W - 1)],
                     );
+                    ((p + m).clamp(0, 128) * 2) as u16
+                });
+            }
+            Effect::Rule(rule) => {
+                out.mix(&self.old, new, |x, y| {
+                    let m = i32::from(rule[y as usize * SCREEN_W + x as usize]);
                     ((p + m).clamp(0, 128) * 2) as u16
                 });
             }
@@ -253,6 +285,26 @@ mod tests {
         t.draw(&new, &mut out, t.length());
         assert_eq!(out.pixel(400, 300).r, 255);
         assert!(t.done(t.length()));
+    }
+
+    #[test]
+    fn full_rules_need_the_screen_size() {
+        assert!(Effect::rule(0, vec![0; 10], 5, 2).is_none());
+        let rule = Effect::rule(
+            0x400,
+            (0..800 * 600).map(|i| (i % 800 / 8) as u8).collect(),
+            800,
+            600,
+        );
+        let Some(Effect::Rule(rule)) = rule else {
+            panic!("not a rule")
+        };
+        assert_eq!(rule[0], 99);
+        let t = Transition::new(Effect::Rule(rule), canvas(Color::BLACK), 0, step(0), 15);
+        let mut out = canvas(Color::BLACK);
+        t.draw(&canvas(Color::WHITE), &mut out, t.length() / 2);
+        // Bright rule values (left, after mirroring) change first.
+        assert!(out.pixel(0, 0).r > out.pixel(799, 0).r);
     }
 
     #[test]
