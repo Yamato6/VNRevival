@@ -69,6 +69,50 @@ pub struct LaunchOptions {
     pub entry: Option<String>,
     /// Font file to use instead of the installed system fonts.
     pub font: Option<PathBuf>,
+    /// Folder for saved games instead of the default one (see
+    /// [`save_dir`]).
+    pub saves: Option<PathBuf>,
+}
+
+/// Where VNRevival keeps its files for this user: `%APPDATA%\VNRevival`
+/// on Windows, `~/Library/Application Support/VNRevival` on macOS and
+/// `$XDG_DATA_HOME/vnrevival` (default `~/.local/share/vnrevival`)
+/// elsewhere.
+pub fn user_data_dir() -> Option<PathBuf> {
+    let var = |name: &str| {
+        std::env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    if cfg!(windows) {
+        var("APPDATA").map(|d| d.join("VNRevival"))
+    } else if cfg!(target_os = "macos") {
+        var("HOME").map(|h| h.join("Library/Application Support/VNRevival"))
+    } else {
+        var("XDG_DATA_HOME")
+            .or_else(|| var("HOME").map(|h| h.join(".local/share")))
+            .map(|d| d.join("vnrevival"))
+    }
+}
+
+/// Default folder for one game's saves: `<user data>/saves/<engine>-<title>`,
+/// with the title reduced to lowercase ASCII letters, digits and dashes.
+pub fn save_dir(game: &GameInfo) -> Option<PathBuf> {
+    let mut slug = String::new();
+    for c in game.title.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let name = if slug.is_empty() {
+        game.engine.to_string()
+    } else {
+        format!("{}-{slug}", game.engine)
+    };
+    Some(user_data_dir()?.join("saves").join(name))
 }
 
 /// Finds `name` inside `dir`, ignoring ASCII case.
@@ -106,6 +150,19 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn save_dirs_use_a_readable_name() {
+        let game = GameInfo {
+            engine: "adv2",
+            title: "Pure Mail".into(),
+            root: PathBuf::new(),
+            details: vec![],
+        };
+        if let Some(dir) = save_dir(&game) {
+            assert!(dir.ends_with("saves/adv2-pure-mail"));
+        }
     }
 
     #[test]

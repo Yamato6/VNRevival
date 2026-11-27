@@ -9,6 +9,7 @@ pub mod assets;
 pub mod game;
 pub mod ini;
 pub mod pc;
+pub mod save;
 pub mod vm;
 
 use std::path::Path;
@@ -82,12 +83,13 @@ impl Backend for Adv2 {
         game: &GameInfo,
         options: &LaunchOptions,
     ) -> Result<Box<dyn App>, BackendError> {
-        let running = game::Game::new(
+        let mut running = game::Game::new(
             &game.root,
             game.title.clone(),
             options.entry.as_deref(),
             options.font.clone(),
         )?;
+        running.set_save_dir(options.saves.clone().or_else(|| vnr_core::save_dir(game)));
         Ok(Box::new(running))
     }
 }

@@ -25,6 +25,7 @@
 //! | `70`, `73` | music track `MM%03d`, stop music | data, provisional |
 //! | `80` | voice | data (`usr 113`) |
 //! | `d5` | title menu; 1-based choice into the variable | `start.obj` |
+//! | `e1` | load menu (title); closing it without loading resumes the script | `start.obj` |
 //! | `04` | backlog entry (ignored; the text is in pictures or windows) | handler `0x422d80` |
 //! | `20` | wait for a click | data (always before `83`) |
 //! | `63`, `83` | stop the sound effect, the voice | `0x426e00`, `0x424590` |
@@ -46,6 +47,7 @@ use vnr_core::{
 use crate::assets::Assets;
 use crate::ini::Settings;
 use crate::pc::{self, Label, Line, Mail, PcView, Popup};
+use crate::save::{self, EngineState, SaveFile, SavedMode, SceneState, SlotSummary, Slots};
 use crate::vm::{Control, Host, Machine, Status, Value};
 
 /// Screen size of the engine.
@@ -59,6 +61,8 @@ pub const CHANNEL_VOICE: usize = 2;
 pub const CHANNELS: usize = 3;
 
 const FADE_FRAMES: u64 = 15;
+/// Script with the shared functions, loaded first.
+const LIBRARY: &str = "pmail";
 const CHARS_PER_FRAME: usize = 1;
 const STEP_BUDGET: usize = 200_000;
 const TEXT_SIZE: f32 = 22.0;
@@ -129,6 +133,8 @@ enum Mode {
     Wait(u64),
     /// Waiting for a click.
     Click,
+    /// Stopped while a menu is open.
+    Paused,
     /// Waiting until a mixer channel is silent (a click skips).
     Channel(usize),
     /// The script stopped.
@@ -145,6 +151,9 @@ struct Scene {
     pc: PcView,
     /// Bumped on every change to `pc`, to notice them cheaply.
     pc_revision: u64,
+    /// Names of the background and character pictures, for saves.
+    background_name: Option<String>,
+    character_names: BTreeMap<i32, String>,
 }
 
 impl Scene {
@@ -162,6 +171,7 @@ impl Scene {
     /// Clears what a new background or fill replaces.
     fn clear_layers(&mut self) {
         self.characters.clear();
+        self.character_names.clear();
         self.pc.clear();
         self.pc_revision += 1;
     }
@@ -210,12 +220,31 @@ pub struct Engine {
     letter: Vec<String>,
     /// Pop-up animations on screen.
     popups: Vec<Popup>,
+
+    /// Names of the scripts loaded so far, by id (for saves).
+    script_names: BTreeMap<u16, String>,
+    /// Music track playing.
+    music: Option<i32>,
+    /// The script asked for the load menu (`sys e1`).
+    load_requested: bool,
 }
 
 impl Engine {
     fn play(&self, channel: usize, clip: Option<Arc<vnr_core::Clip>>) {
         if let (Some(mixer), Some(clip)) = (&self.mixer, clip) {
             mixer.play(channel, clip, FULL_VOLUME);
+        }
+    }
+
+    /// Starts music track `MM%03d`, or stops the music.
+    fn play_music(&mut self, track: Option<i32>) {
+        self.music = track;
+        match track {
+            Some(track) => {
+                let clip = self.assets.sound(&format!("mm{track:03}"));
+                self.play(CHANNEL_MUSIC, clip);
+            }
+            None => self.stop(CHANNEL_MUSIC),
         }
     }
 
@@ -393,7 +422,10 @@ impl Host for Engine {
             0x10 => {
                 let name = text(0);
                 match self.assets.script(&name) {
-                    Ok(script) => vm.start(script),
+                    Ok(script) => {
+                        self.script_names.insert(script.id, name);
+                        vm.start(script);
+                    }
                     Err(e) => {
                         self.mode = Mode::Ended(e.to_string());
                         return Control::Yield;
@@ -410,18 +442,23 @@ impl Host for Engine {
                 }
             }
             0x30 => {
-                self.staged.background = self.assets.picture(&text(0), &["crgb"]);
+                let name = text(0);
+                self.staged.background = self.assets.picture(&name, &["crgb"]);
+                self.staged.background_name = Some(name);
                 self.staged.fill = None;
                 self.clear_pc_layers();
             }
             0x31 => {
                 let slot = num(vm, self, 0);
-                match self.assets.picture(&text(2), &["char"]) {
+                let name = text(2);
+                match self.assets.picture(&name, &["char"]) {
                     Some(sprite) => {
                         self.staged.characters.insert(slot, sprite);
+                        self.staged.character_names.insert(slot, name);
                     }
                     None => {
                         self.staged.characters.remove(&slot);
+                        self.staged.character_names.remove(&slot);
                     }
                 }
             }
@@ -437,6 +474,7 @@ impl Host for Engine {
                     c(num(vm, self, 2)),
                 ));
                 self.staged.background = None;
+                self.staged.background_name = None;
                 self.clear_pc_layers();
             }
             // Backlog entry; the visible text of these lines is in the
@@ -565,13 +603,13 @@ impl Host for Engine {
             }
             0x70 => {
                 let track = num(vm, self, 0);
-                let clip = self.assets.sound(&format!("mm{track:03}"));
-                self.play(CHANNEL_MUSIC, clip);
+                self.play_music(Some(track));
             }
-            0x73 => {
-                if let Some(mixer) = &self.mixer {
-                    mixer.stop(CHANNEL_MUSIC);
-                }
+            0x73 => self.play_music(None),
+            0xE1 => {
+                self.load_requested = true;
+                self.mode = Mode::Paused;
+                return Control::Yield;
             }
             0x80 => {
                 let clip = self.assets.voice(&text(1));
@@ -581,6 +619,7 @@ impl Host for Engine {
                 let variable = args.iter().find_map(|&v| vm.variable_ref(v));
                 self.staged = Scene {
                     background: self.assets.picture("TITL00a", &["crgb"]),
+                    background_name: Some("TITL00a".into()),
                     ..Scene::default()
                 };
                 self.present(true);
@@ -633,6 +672,25 @@ pub struct Game {
     title: String,
     vm: Machine,
     engine: Engine,
+    /// Where saves go; `None` disables saving.
+    slots: Option<Slots>,
+    menu: Option<Menu>,
+}
+
+/// The save or load menu.
+struct Menu {
+    saving: bool,
+    slots: Vec<Option<SlotSummary>>,
+    hover: Option<usize>,
+    /// Opened by the script (`sys e1`): closing it resumes the script.
+    resume: bool,
+    error: Option<String>,
+}
+
+const MENU_PANEL: (i32, i32, u32, u32) = (60, 30, 680, 540);
+
+fn menu_row(i: usize) -> (i32, i32, u32, u32) {
+    (80, 80 + i as i32 * 47, 640, 44)
 }
 
 impl Game {
@@ -646,8 +704,14 @@ impl Game {
     ) -> Result<Self, BackendError> {
         let mut assets = Assets::open(root)?;
         let mut vm = Machine::new();
-        vm.load_library(assets.script("pmail")?);
-        vm.start(assets.script(entry.unwrap_or("start"))?);
+        let mut script_names = BTreeMap::new();
+        let library = assets.script(LIBRARY)?;
+        script_names.insert(library.id, LIBRARY.to_string());
+        vm.load_library(library);
+        let entry = entry.unwrap_or("start");
+        let first = assets.script(entry)?;
+        script_names.insert(first.id, entry.to_string());
+        vm.start(first);
         let settings = Settings::load(vnr_core::find_ci(root, "OF_ADV2.INI").as_deref());
         let engine = Engine {
             assets,
@@ -671,11 +735,398 @@ impl Game {
             mail_lines: Vec::new(),
             letter: Vec::new(),
             popups: Vec::new(),
+            script_names,
+            music: None,
+            load_requested: false,
         };
-        Ok(Self { title, vm, engine })
+        Ok(Self {
+            title,
+            vm,
+            engine,
+            slots: None,
+            menu: None,
+        })
+    }
+
+    /// Sets the folder for saved games; `None` disables saving.
+    pub fn set_save_dir(&mut self, dir: Option<PathBuf>) {
+        self.slots = dir.map(Slots::new);
+    }
+
+    /// Whether the game is at a point where it can be saved.
+    fn can_save(&self) -> bool {
+        matches!(
+            self.engine.mode,
+            Mode::Message { .. } | Mode::Choice { .. } | Mode::Click
+        )
+    }
+
+    /// The current state as a save, if the game is waiting for the
+    /// player.
+    fn save_state(&self) -> Result<SaveFile, String> {
+        let e = &self.engine;
+        let (mode, excerpt) = match &e.mode {
+            Mode::Message {
+                text,
+                speaker,
+                style,
+                ..
+            } => (
+                SavedMode::Message {
+                    text: text.clone(),
+                    speaker: speaker.clone(),
+                    style: *style,
+                },
+                text.clone(),
+            ),
+            Mode::Choice {
+                options, variable, ..
+            } => (
+                SavedMode::Choice {
+                    options: options.clone(),
+                    variable: *variable,
+                },
+                options.join(" / "),
+            ),
+            Mode::Click => {
+                let shown = &e.shown.pc;
+                let text = shown
+                    .mail
+                    .as_ref()
+                    .and_then(|m| m.lines.first())
+                    .or_else(|| shown.chat.as_ref().and_then(|c| c.last()))
+                    .map(|l| l.text.clone())
+                    .or_else(|| shown.letter.clone())
+                    .unwrap_or_default();
+                (SavedMode::Click, text)
+            }
+            _ => return Err("the game can only be saved while it waits for you".into()),
+        };
+        let machine = self.vm.snapshot();
+        let scripts = Machine::scripts_used(&machine)
+            .into_iter()
+            .map(|id| {
+                e.script_names
+                    .get(&id)
+                    .map(|name| (id, name.clone()))
+                    .ok_or_else(|| format!("script {id} has no known name"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let scene = &e.shown;
+        Ok(SaveFile {
+            version: save::VERSION,
+            saved_at: save::now(),
+            chapter: clean_text(&e.chapter),
+            excerpt: save::excerpt(&excerpt, 40),
+            scripts,
+            machine,
+            engine: EngineState {
+                scene: SceneState {
+                    fill: scene.fill.map(|c| [c.r, c.g, c.b]),
+                    background: scene.background_name.clone(),
+                    characters: scene
+                        .character_names
+                        .iter()
+                        .map(|(slot, name)| (*slot, name.clone()))
+                        .collect(),
+                    pc: scene.pc.clone(),
+                },
+                music: e.music,
+                chapter: e.chapter.clone(),
+                speaker: e.speaker.clone(),
+                window_visible: e.window_visible,
+                engine_variables: e.engine_vars.iter().map(|(k, v)| (*k, *v)).collect(),
+                chat_log: e.chat_log.clone(),
+                mail_lines: e.mail_lines.clone(),
+                letter: e.letter.clone(),
+                mode,
+            },
+        })
+    }
+
+    /// Saves into `slot`.
+    pub fn save(&mut self, slot: usize) -> Result<(), String> {
+        let slots = self.slots.as_ref().ok_or("saving is disabled")?;
+        let save = self.save_state()?;
+        slots
+            .write(slot, &save)
+            .map_err(|e| format!("{}: {e}", slots.dir().display()))
+    }
+
+    /// Loads `slot`; an empty slot is an error.
+    pub fn load(&mut self, slot: usize) -> Result<(), String> {
+        let slots = self.slots.as_ref().ok_or("saving is disabled")?;
+        let save = slots
+            .read(slot)
+            .map_err(|e| e.to_string())?
+            .ok_or("this slot is empty")?;
+        self.restore(save)
+    }
+
+    /// Continues from a save.
+    fn restore(&mut self, save: SaveFile) -> Result<(), String> {
+        let e = &mut self.engine;
+        // Build the machine first, so a broken save changes nothing.
+        let mut vm = Machine::new();
+        let library = e.assets.script(LIBRARY).map_err(|e| e.to_string())?;
+        let mut names = BTreeMap::from([(library.id, LIBRARY.to_string())]);
+        vm.load_library(library);
+        for (id, name) in &save.scripts {
+            let script = e.assets.script(name).map_err(|e| e.to_string())?;
+            if script.id != *id {
+                return Err(format!(
+                    "{name} is script {}, the save expects {id}",
+                    script.id
+                ));
+            }
+            names.insert(*id, name.clone());
+            vm.load_library(script);
+        }
+        vm.restore(&save.machine)?;
+        self.vm = vm;
+
+        let state = save.engine;
+        e.script_names.extend(names);
+        let mut scene = Scene {
+            fill: state.scene.fill.map(|[r, g, b]| Color::rgb(r, g, b)),
+            ..Scene::default()
+        };
+        if let Some(name) = state.scene.background {
+            scene.background = e.assets.picture(&name, &["crgb"]);
+            scene.background_name = Some(name);
+        }
+        for (slot, name) in state.scene.characters {
+            if let Some(sprite) = e.assets.picture(&name, &["char"]) {
+                scene.characters.insert(slot, sprite);
+                scene.character_names.insert(slot, name);
+            }
+        }
+        scene.pc = state.scene.pc;
+        if let Some(mail) = &mut scene.pc.mail {
+            mail.frame = pc::MAIL_FRAME.map(|name| e.assets.picture(name, &["img"]));
+        }
+        scene.pc_revision = e.staged.pc_revision + 1;
+        e.staged = scene;
+        e.present(false);
+        e.fade = None;
+        e.popups.clear();
+        e.stop(CHANNEL_VOICE);
+        e.stop(CHANNEL_SOUND);
+        e.play_music(state.music);
+        e.chapter = state.chapter;
+        e.speaker = state.speaker;
+        e.window_visible = state.window_visible;
+        e.engine_vars = state.engine_variables.into_iter().collect();
+        e.chat_log = state.chat_log;
+        e.mail_lines = state.mail_lines;
+        e.letter = state.letter;
+        e.skipping = false;
+        e.hidden = false;
+        e.load_requested = false;
+        e.mode = match state.mode {
+            SavedMode::Message {
+                text,
+                speaker,
+                style,
+            } => Mode::Message {
+                shown: text.chars().count(),
+                text,
+                speaker,
+                style,
+            },
+            SavedMode::Choice { options, variable } => Mode::Choice {
+                options,
+                variable,
+                hover: None,
+            },
+            SavedMode::Click => Mode::Click,
+        };
+        Ok(())
+    }
+
+    fn open_menu(&mut self, saving: bool, resume: bool) {
+        let Some(slots) = &self.slots else {
+            if resume {
+                self.engine.mode = Mode::Running;
+            }
+            return;
+        };
+        if saving && !self.can_save() {
+            return;
+        }
+        self.menu = Some(Menu {
+            saving,
+            slots: slots.summaries(),
+            hover: None,
+            resume,
+            error: None,
+        });
+    }
+
+    fn close_menu(&mut self) {
+        if let Some(menu) = self.menu.take()
+            && menu.resume
+            && self.engine.mode == Mode::Paused
+        {
+            self.engine.mode = Mode::Running;
+        }
+    }
+
+    fn menu_input(&mut self, frame: &Frame<'_>) {
+        let Some(menu) = &mut self.menu else {
+            return;
+        };
+        let mut picked = None;
+        let mut close = false;
+        for event in frame.input {
+            match *event {
+                InputEvent::MouseMove { x, y } => {
+                    menu.hover = (0..save::SLOTS).find(|&i| hit(menu_row(i), x, y));
+                }
+                InputEvent::MouseDown {
+                    button: MouseButton::Left,
+                    x,
+                    y,
+                } => {
+                    picked = (0..save::SLOTS).find(|&i| hit(menu_row(i), x, y));
+                    if picked.is_none() && !hit(MENU_PANEL, x, y) {
+                        close = true;
+                    }
+                }
+                InputEvent::MouseDown {
+                    button: MouseButton::Right,
+                    ..
+                }
+                | InputEvent::KeyDown(Key::Escape) => close = true,
+                InputEvent::KeyDown(Key::Up) => {
+                    menu.hover = Some(
+                        menu.hover
+                            .map_or(0, |i| (i + save::SLOTS - 1) % save::SLOTS),
+                    );
+                }
+                InputEvent::KeyDown(Key::Down) => {
+                    menu.hover = Some(menu.hover.map_or(0, |i| (i + 1) % save::SLOTS));
+                }
+                InputEvent::KeyDown(Key::Enter | Key::Space) => picked = menu.hover,
+                _ => {}
+            }
+        }
+        if close {
+            self.close_menu();
+            return;
+        }
+        let Some(slot) = picked else {
+            return;
+        };
+        let saving = menu.saving;
+        if !saving && menu.slots[slot].is_none() {
+            return;
+        }
+        let result = if saving {
+            self.save(slot)
+        } else {
+            self.load(slot)
+        };
+        match result {
+            Ok(()) => {
+                // A load replaces the paused script: do not resume it.
+                if !saving && let Some(menu) = &mut self.menu {
+                    menu.resume = false;
+                }
+                self.close_menu();
+            }
+            Err(e) => {
+                if let Some(menu) = &mut self.menu {
+                    menu.error = Some(e);
+                }
+            }
+        }
+    }
+
+    fn draw_menu(&mut self, canvas: &mut Canvas) {
+        let Some(menu) = &self.menu else {
+            return;
+        };
+        let font = self.engine.fonts.get(FontFamily::Gothic);
+        canvas.fill_rect(0, 0, WIDTH, HEIGHT, Color::rgba(0, 0, 0, 140));
+        let (px, py, pw, ph) = MENU_PANEL;
+        canvas.fill_rect(px, py, pw, ph, Color::rgba(20, 30, 60, 230));
+        let style = |size: f32, color: Color| TextStyle {
+            size,
+            color,
+            shadow: Some(Color::BLACK),
+            bold: false,
+        };
+        let title = if menu.saving {
+            "セーブ"
+        } else {
+            "ロード"
+        };
+        font.draw_line(
+            canvas,
+            (px + 20) as f32,
+            (py + 12) as f32,
+            title,
+            style(22.0, Color::WHITE),
+        );
+        for (i, slot) in menu.slots.iter().enumerate() {
+            let (x, y, w, h) = menu_row(i);
+            let usable = menu.saving || slot.is_some();
+            let back = if menu.hover == Some(i) && usable {
+                Color::rgba(255, 120, 160, 90)
+            } else {
+                Color::rgba(255, 255, 255, 25)
+            };
+            canvas.fill_rect(x, y, w, h, back);
+            let (line1, line2) = match slot {
+                Some(s) => (
+                    format!("{:02}  {}  {}", i + 1, s.saved_at, s.chapter),
+                    s.excerpt.clone(),
+                ),
+                None => (format!("{:02}  ――", i + 1), String::new()),
+            };
+            font.draw_line(
+                canvas,
+                (x + 10) as f32,
+                (y + 3) as f32,
+                &line1,
+                style(16.0, Color::WHITE),
+            );
+            font.draw_line(
+                canvas,
+                (x + 46) as f32,
+                (y + 23) as f32,
+                &line2,
+                style(14.0, Color::rgb(200, 210, 230)),
+            );
+        }
+        if let Some(error) = &menu.error {
+            font.draw_line(
+                canvas,
+                (px + 20) as f32,
+                (py + ph as i32 - 22) as f32,
+                error,
+                style(14.0, Color::rgb(255, 140, 140)),
+            );
+        }
     }
 
     fn input(&mut self, frame: &Frame<'_>) -> Option<Flow> {
+        if self.menu.is_some() {
+            self.menu_input(frame);
+            return None;
+        }
+        let open = frame.input.iter().find_map(|event| match event {
+            InputEvent::KeyDown(Key::F(2)) => Some(true),
+            InputEvent::KeyDown(Key::F(3)) => Some(false),
+            _ => None,
+        });
+        if let Some(saving) = open {
+            self.open_menu(saving, false);
+            if self.menu.is_some() {
+                return None;
+            }
+        }
         let e = &mut self.engine;
         let mut advance = false;
         let mut pointer = None;
@@ -771,7 +1222,7 @@ impl Game {
                     e.mode = Mode::Running;
                 }
             }
-            Mode::Running | Mode::Ended(_) => {}
+            Mode::Running | Mode::Paused | Mode::Ended(_) => {}
         }
         if let Some((variable, value)) = answer {
             if let Some(var) = variable {
@@ -956,12 +1407,17 @@ impl App for Game {
                 frame.canvas.blend_from(&faded, 255);
             }
         }
+        if self.engine.load_requested {
+            self.engine.load_requested = false;
+            self.open_menu(false, true);
+        }
         for popup in &self.engine.popups {
             popup.draw(frame.canvas, frame.number);
         }
         self.draw_title(frame.canvas);
         self.draw_text_box(frame.canvas);
         self.draw_end(frame.canvas);
+        self.draw_menu(frame.canvas);
         Flow::Continue
     }
 }
@@ -1035,6 +1491,81 @@ mod tests {
             }
         }
         panic!("{name}: not reached in {limit} frames");
+    }
+
+    /// Saves in the middle of the first chat, loads the save into a fresh
+    /// boot and keeps playing (needs `ADV2_GAME_DIR`).
+    #[test]
+    fn saves_and_loads() {
+        let chatting = |e: &Engine| {
+            e.mode == Mode::Click && e.shown.pc.chat.as_ref().is_some_and(|c| c.len() >= 10)
+        };
+        let Some(mut game) = play_prologue_until("save", 40_000, chatting) else {
+            eprintln!("ADV2_GAME_DIR not set or no font, skipping");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("vnr-adv2-saves-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        game.set_save_dir(Some(dir.clone()));
+        game.save(0).unwrap();
+        let machine = game.vm.snapshot();
+        let chat = game.engine.chat_log.clone();
+
+        let root = std::env::var_os("ADV2_GAME_DIR").unwrap();
+        let mut fresh = Game::new(Path::new(&root), "Pure Mail".into(), None, None).unwrap();
+        fresh.set_save_dir(Some(dir.clone()));
+        fresh.load(0).unwrap();
+        assert_eq!(fresh.vm.snapshot(), machine);
+        assert_eq!(fresh.engine.chat_log, chat);
+        assert_eq!(fresh.engine.mode, Mode::Click);
+        assert_eq!(
+            fresh.engine.shown.background_name,
+            game.engine.shown.background_name
+        );
+
+        // Both copies play on identically.
+        let mixer = Mixer::new(CHANNELS);
+        let click = InputEvent::MouseDown {
+            button: MouseButton::Left,
+            x: 0,
+            y: 0,
+        };
+        let script: Vec<(u64, InputEvent)> = (5..600).step_by(20).map(|f| (f, click)).collect();
+        vnr_core::run_headless(&mut game, &mixer, 600, &script);
+        vnr_core::run_headless(&mut fresh, &mixer, 600, &script);
+        assert_eq!(fresh.vm.snapshot(), game.vm.snapshot());
+        assert!(fresh.engine.chat_log.len() > chat.len());
+
+        // From the title: "Load" opens the menu, the first slot loads.
+        let mut booted = Game::new(Path::new(&root), "Pure Mail".into(), None, None).unwrap();
+        booted.set_save_dir(Some(dir.clone()));
+        let (x, y, ..) = title_button_rect(1);
+        let load = InputEvent::MouseDown {
+            button: MouseButton::Left,
+            x: x + 5,
+            y: y + 5,
+        };
+        let script: Vec<(u64, InputEvent)> = (20..600).step_by(20).map(|f| (f, load)).collect();
+        let canvas = vnr_core::run_headless(&mut booted, &mixer, 600, &script);
+        assert!(booted.menu.as_ref().is_some_and(|m| !m.saving));
+        if let Some(out) = std::env::var_os("VNR_SHOT_DIR") {
+            canvas
+                .save_png(&Path::new(&out).join("load-menu.png"))
+                .unwrap();
+        }
+        let (x, y, ..) = menu_row(0);
+        let pick = [(
+            0,
+            InputEvent::MouseDown {
+                button: MouseButton::Left,
+                x: x + 5,
+                y: y + 5,
+            },
+        )];
+        vnr_core::run_headless(&mut booted, &mixer, 1, &pick);
+        assert!(booted.menu.is_none());
+        assert_eq!(booted.vm.snapshot(), machine);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Every `sys 33` pop-up decodes at its size (needs `ADV2_GAME_DIR`).

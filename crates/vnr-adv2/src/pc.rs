@@ -26,6 +26,7 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use vnr_core::{Canvas, Color, Font, Sprite, TextStyle};
 
 /// Rows the chat window shows.
@@ -68,14 +69,14 @@ pub const POPUPS: [(&str, u32, u32, u32, bool, bool); 19] = [
 ];
 
 /// A line of chat or mail and its character style.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Line {
     pub style: i32,
     pub text: String,
 }
 
 /// Text placed with `sys 34`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Label {
     pub text: String,
     pub rect: (i32, i32, u32, u32),
@@ -84,17 +85,19 @@ pub struct Label {
 }
 
 /// The open mail.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Mail {
     pub rect: (i32, i32, u32, u32),
     pub size: f32,
     pub gap: f32,
     pub lines: Vec<Line>,
+    /// The window pictures ([`MAIL_FRAME`]); not saved, loaded again.
+    #[serde(skip)]
     pub frame: [Option<Arc<Sprite>>; 3],
 }
 
 /// What the PC shows in a scene.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct PcView {
     /// The chat log, when its window is drawn.
     pub chat: Option<Vec<Line>>,

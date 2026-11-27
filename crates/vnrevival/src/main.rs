@@ -40,6 +40,10 @@ enum Command {
         /// Font file to use instead of the system's Japanese fonts.
         #[arg(long)]
         font: Option<PathBuf>,
+        /// Folder for saved games (default: a folder per game in the
+        /// user's data directory).
+        #[arg(long)]
+        saves: Option<PathBuf>,
         /// Initial window size as a multiple of the game resolution.
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=4))]
         scale: u32,
@@ -75,6 +79,7 @@ fn main() -> ExitCode {
             game,
             script,
             font,
+            saves,
             scale,
             frames,
             screenshot,
@@ -84,6 +89,7 @@ fn main() -> ExitCode {
             let options = LaunchOptions {
                 entry: script,
                 font,
+                saves,
             };
             let clicks = click_every.map(|n| (n, click_at));
             let result = match frames {

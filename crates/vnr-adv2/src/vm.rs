@@ -17,7 +17,7 @@
 //! * `text` appends a string to the message log, which the message
 //!   function consumes.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 use overflow_adv2::script::{self, Opcode, Operand, Script};
@@ -115,6 +115,20 @@ pub enum Status {
     Error(String),
 }
 
+/// What [`Machine::snapshot`] saves.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Snapshot {
+    /// Id of the running script.
+    pub current: u16,
+    pub pc: usize,
+    pub acc: u32,
+    pub stack: Vec<(u32, u32)>,
+    /// Variables that are not 0.
+    pub variables: Vec<(u16, i32)>,
+    pub seed: u32,
+    pub halted: bool,
+}
+
 /// The machine state.
 #[derive(Debug, Clone)]
 pub struct Machine {
@@ -174,6 +188,67 @@ impl Machine {
         self.current = self.register(script);
         self.pc = 0;
         self.halted = false;
+    }
+
+    /// The state needed to resume later; scripts are referred to by id.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            current: self.current,
+            pc: self.pc,
+            acc: self.acc.0,
+            stack: self.stack.clone(),
+            variables: self
+                .vars
+                .iter()
+                .enumerate()
+                .filter(|&(_, &v)| v != 0)
+                .map(|(id, &v)| (id as u16, v))
+                .collect(),
+            seed: self.seed,
+            halted: self.halted,
+        }
+    }
+
+    /// Scripts a snapshot needs loaded: the running one, the callers on
+    /// the stack, and those whose strings are on the stack.
+    pub fn scripts_used(snapshot: &Snapshot) -> BTreeSet<u16> {
+        let mut used = BTreeSet::from([snapshot.current]);
+        let text_script = |raw: u32| {
+            let v = Value(raw);
+            (v.kind() == Kind::Text).then(|| v.script())
+        };
+        used.extend(text_script(snapshot.acc));
+        for &(a, b) in &snapshot.stack {
+            if a & 0xF_0000 == FRAME_TAG {
+                used.insert(b as u16);
+            } else {
+                used.extend(text_script(a));
+            }
+        }
+        used.retain(|&id| id != 0);
+        used
+    }
+
+    /// Resumes from a snapshot. Every script it uses must be loaded.
+    pub fn restore(&mut self, snapshot: &Snapshot) -> Result<(), String> {
+        if let Some(missing) = Self::scripts_used(snapshot)
+            .into_iter()
+            .find(|id| !self.scripts.contains_key(id))
+        {
+            return Err(format!("script {missing} is not loaded"));
+        }
+        self.current = snapshot.current;
+        self.pc = snapshot.pc;
+        self.acc = Value(snapshot.acc);
+        self.stack = snapshot.stack.clone();
+        self.vars.fill(0);
+        for &(id, v) in &snapshot.variables {
+            self.vars[usize::from(id)] = v;
+        }
+        self.seed = snapshot.seed;
+        self.halted = snapshot.halted;
+        self.log.clear();
+        Ok(())
     }
 
     pub fn current_script(&self) -> Option<&Script> {

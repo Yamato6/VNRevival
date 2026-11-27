@@ -12,6 +12,9 @@ repository.workspace = true
 vnr-core.workspace = true
 overflow-adv2.workspace = true
 encoding_rs = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
 
 [lints]
 workspace = true
