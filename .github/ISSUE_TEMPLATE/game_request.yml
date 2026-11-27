@@ -1,0 +1,30 @@
+name: Game request
+description: Ask for a game or an engine to be supported.
+labels: [game request]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        VNRevival reimplements old visual novel engines. A request is most useful when it says which engine the game uses and how many other games use it.
+  - type: input
+    id: games
+    attributes:
+      label: Game(s)
+      placeholder: "Title (developer, year)"
+    validations:
+      required: true
+  - type: input
+    id: engine
+    attributes:
+      label: Engine, if known
+      description: The program's name or its data files' extensions can help identify the engine.
+  - type: textarea
+    id: why
+    attributes:
+      label: What goes wrong with the original today
+      description: For example, it does not start on Windows 10/11, it has broken audio, or it has no macOS/Linux version.
+  - type: textarea
+    id: availability
+    attributes:
+      label: Where it can be obtained legally
+      description: Store pages, re-releases, or "out of print".

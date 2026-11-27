@@ -1,299 +1,109 @@
-# VNRevival
+<p align="center">
+  <img src="assets/banner.png" alt="VNRevival — old visual novels, revived on Windows, macOS and Linux" width="720">
+</p>
 
-A modern, cross-platform runtime for **old visual novels** whose original
-engines no longer run well on current systems. Like ScummVM does for
-adventure games, VNRevival reads the data files of **your own legal copy**
-and plays them on Windows, Linux and macOS.
+<p align="center">
+  <a href="https://github.com/Yamato6/VNRevival/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Yamato6/VNRevival?include_prereleases&label=download"></a>
+  <a href="https://github.com/Yamato6/VNRevival/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Yamato6/VNRevival/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
 
-VNRevival ships **no game data**.
+**VNRevival** plays old visual novels on today's computers. Their
+original engines were made for Windows 98 and often no longer run on
+current systems, or run badly. VNRevival is a new engine that
+reimplements them: it reads the data files of **your own copy** of a game
+and plays its original scripts on Windows, macOS and Linux, much as
+[ScummVM](https://www.scummvm.org/) does for adventure games.
 
-Players: download VNRevival for Windows, macOS or Linux from the
-[releases](https://github.com/Yamato6/VNRevival/releases) and see the
-**[user manual](docs/MANUAL.md)**.
+VNRevival does not come with any game. You need a legal copy of the game.
 
-## Supported engines
+<table>
+  <tr>
+    <td><img src="docs/images/game.png" alt="Pure Mail running in VNRevival"></td>
+    <td><img src="docs/images/library.png" alt="The game library"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/history.png" alt="The message history, with voices"></td>
+    <td><img src="docs/images/settings.png" alt="Text settings with a live preview"></td>
+  </tr>
+</table>
+
+## Features
+
+* **Runs the original scripts.** Each supported engine is reimplemented
+  from its own bytecode, with the original timings, music, voices and
+  movies.
+* **Windows, macOS and Linux.** One program with no installer that keeps
+  the picture's shape in any window size or full screen.
+* **One interface for every game.** A game library, save anywhere with
+  10 slots per game, a message history that replays voices, auto mode,
+  and skipping that stops at text you have not read yet.
+* **Extras.** A CG gallery, a music room and scene replay. Progress made
+  in the original game counts.
+* **Easy to read.** Modern Japanese fonts, adjustable text size and line
+  spacing, outlined text, a high-contrast mode, and window opacity.
+* **Interface in English, Spanish and Japanese**, with your own wording
+  possible for each.
+
+## Supported games
 
 | Engine | Games | Status |
 |---|---|---|
-| OverflowADV2 (`adv2`) | Pure Mail (2001) | Boots and plays on the original scripts; many engine functions still missing |
+| OverflowADV2 | Pure Mail (Overflow, 2001), DVD edition | Playable on its original scripts; some effects and engine functions are still missing |
 
-## How it fits together
+More engines are planned. If you would like a game supported, open a
+[game request](https://github.com/Yamato6/VNRevival/issues/new/choose).
 
-```
-VNTools-rs (format crates)      VNRevival
-┌──────────────────────┐        ┌───────────────────────────────────────┐
-│ overflow-adv2        │──────▶ │ vnr-adv2   backend: engine → Session   │
-│   packs, LZSS, ...   │        │ vnr-core   runtime, interface, Backend │
-└──────────────────────┘        │ vnrevival  the executable              │
-                                └───────────────────────────────────────┘
-```
+## Download and play
 
-* **[VNTools-rs](https://github.com/Yamato6/VNTools-rs)** holds the
-  readers for each engine's file formats, plus extraction tools and the
-  reverse-engineering notes. Formats are figured out there first.
-* **`vnr-core`** is engine-independent: the [`Backend`] interface, the
-  shared runtime (a software compositor, a mixer for 44.1 kHz stereo
-  clips with loops, Japanese text with installed fonts, input events)
-  and the **universal interface**, `Shell`: the game library, main menu,
-  pause menu, save slots, message history, settings and extras, the same
-  for every game. A game
-  is a `Session` that only plays itself; the shell shows its screen
-  scaled inside a 1280 × 720 interface. Nothing here knows about windows
-  or devices, so it runs headless in tests.
-* **`vnrevival`** is the executable. It drives the shell with SDL2
-  (window, scaling, vsync, audio, input) or without any device for
-  screenshots.
-* **`vnr-<engine>`** crates are backends: they use the format crates to
-  turn an original engine's scripts and assets into a `Session`.
+1. Download the package for your system from the
+   [latest release](https://github.com/Yamato6/VNRevival/releases/latest):
+   a `.zip` for Windows, a `.dmg` for macOS (Intel and Apple Silicon), or
+   an `.AppImage` or `.tar.gz` for Linux.
+2. Open VNRevival and click **Add game…**, then choose the folder where
+   your game is installed.
+3. Click the game to play.
 
-Adding a new engine means adding its format crate to VNTools-rs and a
-backend crate here; the runtime and the interface stay the same.
+The **[user manual](docs/MANUAL.md)** explains everything else:
+controls, saves, settings, where your files are kept, and what to do if
+something goes wrong.
 
-[`Backend`]: crates/vnr-core/src/lib.rs
+## Building from source
 
-## Usage
+You need Rust 1.85 or newer, CMake and a C compiler (SDL2 is built in
+statically).
 
 ```sh
-cargo run --release -- engines             # list supported engines
-cargo run --release -- detect "<game dir>" # identify a game install
-cargo run --release -- run                 # the game library
-cargo run --release -- run "<game dir>"    # play a game directly
+git clone https://github.com/Yamato6/VNRevival
+cd VNRevival
+cargo run --release
 ```
 
-Without a command, `run` is assumed: opening the executable from a file
-manager shows the library. On Windows it is a GUI program (no console
-window); started from a terminal it still prints there, but the
-terminal does not wait for it (in PowerShell, `Start-Process -Wait
--NoNewWindow` does). Errors are also shown in a message box.
+**[docs/DEVELOPING.md](docs/DEVELOPING.md)** covers the architecture,
+the per-system dependencies, tests with real game data, the command
+line, and how releases are made. Format readers live in the companion
+project **[VNTools-rs](https://github.com/Yamato6/VNTools-rs)**, which
+also has extraction tools and reverse-engineering notes.
 
-`run` without a folder opens the **library**: the games you added, with
-their cover and when you last played. "Add game…" opens a folder
-picker: go to the folder where the game is installed (the one with its
-`.exe` and data) and "Use this folder" once it shows the game's name.
-Click a game to play it; the × on a card takes it out of the library
-(its files are not touched). `run <folder>` opens that game at once and
-adds it to the library. In a game's main menu, "Change game" goes back
-to the library.
-
-`run` options:
-
-| Option | Meaning |
-|---|---|
-| `--script NAME` | start from another script instead of the normal entry point |
-| `--font FILE` | font file to use instead of the font setting |
-| `--scale N` | initial window size, 1–3 times 1280 × 720 |
-| `--new-game` | skip VNRevival's menu and start a new game |
-| `--saves DIR` | folder for saved games instead of the default one |
-| `--frames N` | run without a window for N frames (60 per second) |
-| `--screenshot FILE` | with `--frames`: save the last frame as PNG |
-| `--click-every N` | with `--frames`: click every N frames |
-| `--click-at X,Y` | where those clicks land, in 1280 × 720 interface pixels (default `0,0`) |
-
-A game opens on VNRevival's main menu (new game, load, extras,
-settings, quit); the settings can switch to the game's own title screen
-instead.
-
-In a game: click, Enter or Space advance the text, Ctrl skips (it stops
-at text you have not read before, unless the settings say otherwise), A
-turns auto mode on or off, the middle button hides the message window.
-Escape or right-click open the pause menu (save, load, history, auto
-mode, settings, main menu, quit). Shortcuts: F2
-saves, F3 loads, F4 opens the settings, the wheel up or Page Up opens the
-message history (click a marked line to hear its voice again). Escape or
-right-click close any screen; Alt+Enter toggles full screen. The window
-can be resized; the picture keeps its aspect ratio.
-
-**Pure Mail today:** the game boots like the original (`pmail.obj` +
-`start.obj`) and runs its compiled scripts on a reimplementation of the
-engine's script machine: variables, expressions, calls into the shared
-functions of `pmail.obj`, branches and script changes all work (an
-automated walk covers the whole game without a machine error). Implemented
-on the engine side: the title menu, messages with speaker colours and
-voices, choices, backgrounds, character sprites, colour fills,
-transitions with the original timings (cross-fade and the "morning light"
-wipe), waits, music, sound effects and voices, and the in-game PC:
-the chat client, the mailer, letters, text labels, the taskbar clock,
-pop-up animations, the opening movie (Indeo 5, decoded by VNTools-rs;
-a click ends it), music and sound fade-outs, the calendar's voices, and
-each ending's staff roll with the heroine's memories (an ending already
-seen can be skipped with a click). "New game" in VNRevival's menu runs the game's
-start-up unseen and answers its title; with the original title screen,
-its load button opens VNRevival's load screen.
-Still missing: several effects; engine functions that are not implemented are skipped and
-reported once on the console. The PC's layout comes from the game's own
-window graphics and the engine's handlers, but fonts and colours inside
-the windows are approximations.
-
-### Saved games
-
-There are 10 slots per game. You can save whenever the game waits for
-you (a message, a choice, a chat line or an open mail). Saves are JSON
-files in
-`%APPDATA%\VNRevival\saves\<game>` on Windows,
-`~/Library/Application Support/VNRevival/saves/<game>` on macOS and
-`~/.local/share/vnrevival/saves/<game>` elsewhere (or under `--saves`).
-They are VNRevival's own format: saves made with the original game are
-not read.
-
-### Extras
-
-The extras screen has three tabs:
-
-* **CG gallery**: every event picture, as thumbnails; a picture opens
-  full screen and a click (or →) shows its next variant.
-* **Music**: every track; click one to play it, again to stop.
-* **Scenes**: the game's scene replay list; a scene plays from its start
-  and returns to the list when it ends.
-
-Only what you have seen or heard is open, unless "Unlock all extras" is
-on in the settings. For Pure Mail, the pictures and scenes use the same
-records as the original (`system.sav`, imported from the original's
-`SAVE/SAVEFL99.SAV` the first time), so progress made with the original
-counts; music heard is VNRevival's own record (`music.json`). The first
-scene is the opening movie.
-
-### Settings
-
-The settings screen (F4) has four tabs, and a fifth, **Game**, for a
-game with options of its own:
-
-* **System**: interface language (English, Spanish or Japanese), the
-  interface font, what to show at start (VNRevival's menu or the game's title), full screen,
-  unlock all extras.
-* **Sound**: master, music, sound effect and voice volumes.
-* **Text**, with a preview: the game text font, text size (18 to 30 pixels of game
-  text), line spacing, text edge (none, shadow or a full outline), high
-  contrast (an opaque black window with white text) and window opacity.
-  The message window grows upwards when larger text needs the room.
-* **Reading**: text speed, auto mode speed, whether auto mode waits for
-  the voice to end, and whether skipping also skips text not read yet.
-  VNRevival remembers what you have read in every playthrough
-  (`read.json` next to the saves).
-* **Game**: the game's own options (for Pure Mail, the hero's names).
-
-They apply to every game and are kept in `settings.json` in the user
-data folder
-(`%APPDATA%\VNRevival` on Windows, `~/Library/Application
-Support/VNRevival` on macOS, `~/.local/share/vnrevival` elsewhere).
-
-Each interface language can be changed or completed with a
-`lang/<code>.json` file in that folder (`en`, `es`, `ja`) holding
-`{"key": "text"}` pairs; the keys are listed in `crates/vnr-core/src/lang.rs`.
-
-Options that belong to one game are kept with its saves. A new game of
-Pure Mail asks for the hero's names (surname and given name with their
-readings, and the chat handle), as the original's dialog did; they are
-typed with the keyboard or the system's input method (IME), which is on
-only while a field is being typed into. They can be changed later in
-Settings → Game, apply from the next new game and are kept in
-`options.json`. Voices say the hero's name only while the readings and
-the handle are the original ones.
-
-### Fonts
-
-The interface and the game text use **Noto Sans JP** by default, each
-with its own setting (System → Interface font, Text → Game text font;
-the history follows the game text font). Both offer the fonts that are
-installed among Noto Sans JP,
-Noto Serif JP, BIZ UDPGothic, BIZ UDPMincho, Yu Gothic and Meiryo, and
-**Original**: the fonts the game asked for (ＭＳ Ｐ明朝, ＭＳ Ｐゴシック),
-or the closest substitute installed. When the chosen font is missing the
-next one available is used. Variable fonts (such as `NotoSansJP-VF.ttf`
-from Google Fonts) are drawn at a regular weight, with a real bold.
-
-Noto Sans JP is free (SIL Open Font License) and the release packages
-include it: VNRevival also looks for fonts in `fonts` next to the
-executable, `../Resources/fonts` (macOS app) and
-`../share/vnrevival/fonts` (AppImage), after the installed ones. A
-build of your own uses the installed fonts: install Noto Sans JP from
-Google Fonts on Windows and macOS, or `fonts-noto-cjk` on Linux.
-`--font` picks a font file for both instead of the settings.
-
-## Building and testing
-
-Requires Rust 1.85 or newer, plus **CMake** and a C compiler: SDL2 is
-built from source and linked statically (the `bundled` and `static-link`
-features of the `sdl2` crate), so the result has no SDL DLL to ship.
-
-* **Windows:** Visual Studio or its Build Tools. If `cmake` is not on
-  `PATH`, point the `CMAKE` environment variable at the one Visual Studio
-  ships (`Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe`),
-  for example in `.cargo/config.toml` under `[env]`.
-* **Linux:** `cmake` and the development headers SDL needs for a window
-  and sound, e.g. on Debian/Ubuntu
-  `sudo apt install cmake libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libwayland-dev libxkbcommon-dev libasound2-dev libpulse-dev`.
-* **macOS:** `brew install cmake`.
-
-```sh
-cargo build --release
-cargo test
-```
-
-Tests that need real game data are skipped unless an environment variable
-points at the install, e.g. `ADV2_GAME_DIR` for Pure Mail:
-
-```sh
-ADV2_GAME_DIR="/path/to/PMAILDVD" cargo test
-```
-
-### Release packages
-
-Pushing a tag `vX.Y.Z` that matches the version in `Cargo.toml` runs
-[`release.yml`](.github/workflows/release.yml): it builds and packs
-VNRevival on each system with [`packaging/package.sh`](packaging/package.sh)
-and creates a **draft** release with the packages, to be checked and
-published by hand. Running the workflow by hand (*Actions → Release →
-Run workflow*) builds the packages as artifacts only.
-
-| Package | Contents |
-|---|---|
-| `VNRevival-<v>-windows-x64.zip` | `VNRevival.exe` (C runtime linked in, icon and version embedded), `fonts/` |
-| `VNRevival-<v>-macos.dmg` | `VNRevival.app`, one binary for Intel and Apple Silicon, macOS 11+, ad-hoc signed |
-| `VNRevival-<v>-linux-x64.AppImage` | the program, its font, icon and desktop entry, built on Ubuntu 22.04 |
-| `VNRevival-<v>-linux-x64.tar.gz` | the same as a plain folder |
-
-Each also holds the license, the manual and Noto Sans JP with its
-license (`OFL.txt`), downloaded from a pinned commit of
-[google/fonts](https://github.com/google/fonts) and checked against a
-SHA-256. The icon is drawn by
-[`assets/icon/make_icon.py`](assets/icon/make_icon.py) (Pillow).
-
-To pack by hand, build in release mode and run
-`packaging/package.sh windows|linux|macos <binary>` (Git Bash on
-Windows); the package goes to `dist/`.
-
-### Working on VNTools-rs at the same time
-
-The format crates are a git dependency. To use a local checkout instead,
-create `.cargo/config.toml` (ignored by git) with:
-
-```toml
-[patch."https://github.com/Yamato6/VNTools-rs"]
-overflow-adv2 = { path = "../VNTools-rs/overflow-adv2" }
-indeo = { path = "../VNTools-rs/indeo" }
-```
+Contributions are welcome. Please read
+[CONTRIBUTING.md](CONTRIBUTING.md) first.
 
 ## Roadmap
 
-1. ✅ OverflowADV2 formats in VNTools-rs: images, audio, script bytecode.
-2. ✅ Runtime core: window, rendering and input on SDL2, Japanese text,
-   audio mixing, headless runs with screenshots.
-3. Pure Mail playable. Done: script interpreter (variables, expressions,
-   `pmail.obj` functions, the engine's `sys` calls), choices, the in-game
-   PC, the opening movie. To do: the remaining engine functions and
-   effects.
-4. Universal interface. Done: game library with a folder picker, main
-   menu, pause menu, save slots, history, settings, interface languages,
-   CG gallery, music room, scene replay; accessibility (fonts, text size,
-   line spacing, outline, high contrast, auto mode, skipping only read
-   text); the game's own options with text input (IME); the
-   [user manual](docs/MANUAL.md).
+1. ✅ OverflowADV2 formats in VNTools-rs: images, audio, script bytecode, Indeo 5 video.
+2. ✅ Runtime core: window, rendering, input, Japanese text, audio
+   mixing, and headless runs for tests.
+3. 🚧 Pure Mail complete: the remaining engine functions and effects.
+4. ✅ Universal interface: library, menus, saves, history, settings,
+   extras, accessibility, interface languages.
 5. Mods and translations.
 6. More engines.
 
 ## License
 
-[MIT](LICENSE).
+VNRevival is released under the [MIT license](LICENSE). Release
+packages include Noto Sans JP under the SIL Open Font License.
 
-Game names and trademarks belong to their owners. This project is not
-affiliated with them.
+Game names, pictures and trademarks belong to their owners; the
+screenshots above show a copy of Pure Mail © Overflow. This project is
+not affiliated with Overflow or any other developer or publisher.

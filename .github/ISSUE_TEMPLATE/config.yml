@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: User manual
+    url: https://github.com/Yamato6/VNRevival/blob/main/docs/MANUAL.md
+    about: Controls, saves, settings, and answers to common problems.
