@@ -3,6 +3,7 @@
 </p>
 
 <p align="center">
+  <a href="https://yamato6.github.io/VNRevival-web/"><img alt="Website" src="https://img.shields.io/badge/website-VNRevival-d4402b"></a>
   <a href="https://github.com/Yamato6/VNRevival/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Yamato6/VNRevival?include_prereleases&label=download"></a>
   <a href="https://github.com/Yamato6/VNRevival/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Yamato6/VNRevival/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue"></a>
@@ -16,6 +17,9 @@ and plays its original scripts on Windows, macOS and Linux, much as
 [ScummVM](https://www.scummvm.org/) does for adventure games.
 
 VNRevival does not come with any game. You need a legal copy of the game.
+
+Downloads, the user manual and the developer notes are also on the
+**[website](https://yamato6.github.io/VNRevival-web/)**.
 
 <table>
   <tr>
