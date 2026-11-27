@@ -25,6 +25,11 @@
 //! | `70`, `73` | music track `MM%03d`, stop music | data, provisional |
 //! | `80` | voice | data (`usr 113`) |
 //! | `d5` | title menu; 1-based choice into the variable | `start.obj` |
+//! | `04` | backlog entry (ignored; the text is in pictures or windows) | handler `0x422d80` |
+//! | `20` | wait for a click | data (always before `83`) |
+//! | `63`, `83` | stop the sound effect, the voice | `0x426e00`, `0x424590` |
+//! | `65`, `85` | wait until the sound effect, the voice ends | `0x424000`, `0x4245c0` |
+//! | `a0`–`c3`, `33`, `34`, `50` | the in-game PC | see [`crate::pc`] |
 //!
 //! Everything else is ignored for now and reported once on stderr.
 
@@ -40,6 +45,7 @@ use vnr_core::{
 
 use crate::assets::Assets;
 use crate::ini::Settings;
+use crate::pc::{self, Label, Line, Mail, PcView, Popup};
 use crate::vm::{Control, Host, Machine, Status, Value};
 
 /// Screen size of the engine.
@@ -121,6 +127,10 @@ enum Mode {
     },
     /// Waiting until a frame number.
     Wait(u64),
+    /// Waiting for a click.
+    Click,
+    /// Waiting until a mixer channel is silent (a click skips).
+    Channel(usize),
     /// The script stopped.
     Ended(String),
 }
@@ -131,10 +141,14 @@ struct Scene {
     fill: Option<Color>,
     background: Option<Arc<Sprite>>,
     characters: BTreeMap<i32, Arc<Sprite>>,
+    /// The PC screen drawn over the background.
+    pc: PcView,
+    /// Bumped on every change to `pc`, to notice them cheaply.
+    pc_revision: u64,
 }
 
 impl Scene {
-    fn draw(&self, canvas: &mut Canvas) {
+    fn draw(&self, canvas: &mut Canvas, font: &mut Font) {
         canvas.clear(self.fill.unwrap_or(Color::BLACK));
         if let Some(bg) = &self.background {
             canvas.draw(bg, 0, 0, 255);
@@ -142,6 +156,25 @@ impl Scene {
         for sprite in self.characters.values() {
             canvas.draw(sprite, 0, 0, 255);
         }
+        self.pc.draw(canvas, font);
+    }
+
+    /// Clears what a new background or fill replaces.
+    fn clear_layers(&mut self) {
+        self.characters.clear();
+        self.pc.clear();
+        self.pc_revision += 1;
+    }
+
+    fn same_picture(&self, other: &Scene) -> bool {
+        self.fill == other.fill
+            && opt_ptr(&self.background) == opt_ptr(&other.background)
+            && self.characters.len() == other.characters.len()
+            && self
+                .characters
+                .iter()
+                .zip(&other.characters)
+                .all(|((a, x), (b, y))| a == b && Arc::ptr_eq(x, y))
     }
 }
 
@@ -168,6 +201,15 @@ pub struct Engine {
     unknown: BTreeSet<u8>,
     skipping: bool,
     hidden: bool,
+
+    /// Chat lines since the last `sys a1`.
+    chat_log: Vec<Line>,
+    /// Lines of the mail being built (`sys b2`).
+    mail_lines: Vec<Line>,
+    /// Paragraphs of the letter being built (`sys c2`).
+    letter: Vec<String>,
+    /// Pop-up animations on screen.
+    popups: Vec<Popup>,
 }
 
 impl Engine {
@@ -177,28 +219,91 @@ impl Engine {
         }
     }
 
+    fn stop(&self, channel: usize) {
+        if let Some(mixer) = &self.mixer {
+            mixer.stop(channel);
+        }
+    }
+
+    /// Waits until `channel` is silent.
+    fn wait_channel(&mut self, channel: usize) -> Control {
+        let playing = self.mixer.as_ref().is_some_and(|m| m.is_playing(channel));
+        if !playing || self.skipping {
+            return Control::Continue;
+        }
+        self.present_if_changed();
+        self.mode = Mode::Channel(channel);
+        Control::Yield
+    }
+
+    /// What a new background or fill clears: characters, everything on
+    /// the PC screen except the chat log, and pop-ups.
+    fn clear_pc_layers(&mut self) {
+        self.staged.clear_layers();
+        self.mail_lines.clear();
+        self.popups.clear();
+    }
+
     /// Shows the staged scene, with a cross-fade if `fade`.
     fn present(&mut self, fade: bool) {
         if fade && !self.skipping {
             self.fade = Some((self.shown_canvas.clone(), self.frame));
         }
         self.shown = self.staged.clone();
-        self.shown.draw(&mut self.shown_canvas);
+        self.shown
+            .draw(&mut self.shown_canvas, self.fonts.get(FontFamily::Gothic));
     }
 
+    /// Shows the staged scene if it differs from the one on screen:
+    /// picture changes fade, PC text changes appear at once.
     fn present_if_changed(&mut self) {
-        let same = self.shown.fill == self.staged.fill
-            && opt_ptr(&self.shown.background) == opt_ptr(&self.staged.background)
-            && self.shown.characters.len() == self.staged.characters.len()
-            && self
-                .shown
-                .characters
-                .iter()
-                .zip(&self.staged.characters)
-                .all(|((a, x), (b, y))| a == b && Arc::ptr_eq(x, y));
-        if !same {
+        if !self.shown.same_picture(&self.staged) {
             self.present(true);
+        } else if self.shown.pc_revision != self.staged.pc_revision {
+            self.present(false);
         }
+    }
+
+    /// Changes the PC view of the staged scene.
+    fn stage_pc(&mut self, change: impl FnOnce(&mut PcView)) {
+        change(&mut self.staged.pc);
+        self.staged.pc_revision += 1;
+    }
+
+    /// Adds a chat line, shows the log and waits for a click.
+    fn chat_line(&mut self, vm: &Machine, args: &[Value]) -> Control {
+        let Some(line) = self.line_arg(vm, args) else {
+            return Control::Continue;
+        };
+        if let Some(voice) = args.iter().find_map(|&v| voice_after(vm, v)) {
+            let clip = self.assets.voice(&voice);
+            self.play(CHANNEL_VOICE, clip);
+        }
+        self.chat_log.push(line);
+        let tail = self.chat_tail();
+        self.stage_pc(|pc| pc.chat = Some(tail));
+        self.present_if_changed();
+        if self.skipping {
+            return Control::Continue;
+        }
+        self.mode = Mode::Click;
+        Control::Yield
+    }
+
+    /// The end of the chat log: enough lines to fill the window.
+    fn chat_tail(&self) -> Vec<Line> {
+        let start = self.chat_log.len().saturating_sub(pc::CHAT_ROWS);
+        self.chat_log[start..].to_vec()
+    }
+
+    /// `(style, text)` arguments as a [`Line`].
+    fn line_arg(&mut self, vm: &Machine, args: &[Value]) -> Option<Line> {
+        let style = args.first().map_or(0, |&v| vm.number(self, v));
+        let text = args.get(1).and_then(|&v| vm.text(v))?;
+        Some(Line {
+            style,
+            text: clean_text(&text),
+        })
     }
 
     fn message(&mut self, vm: &mut Machine) -> Control {
@@ -243,6 +348,17 @@ impl Engine {
             );
         }
     }
+}
+
+/// The voice file stored as the pool entry after a text argument, if
+/// that entry looks like one (`V…`, letters and digits).
+fn voice_after(vm: &Machine, value: Value) -> Option<String> {
+    vm.text(value)?;
+    let next = vm.pool_text(value.script(), value.low().wrapping_add(1))?;
+    let looks_like_voice = next.len() >= 5
+        && next.starts_with(['V', 'v'])
+        && next.bytes().all(|b| b.is_ascii_alphanumeric());
+    looks_like_voice.then_some(next)
 }
 
 fn opt_ptr(sprite: &Option<Arc<Sprite>>) -> Option<*const Sprite> {
@@ -295,8 +411,8 @@ impl Host for Engine {
             }
             0x30 => {
                 self.staged.background = self.assets.picture(&text(0), &["crgb"]);
-                self.staged.characters.clear();
                 self.staged.fill = None;
+                self.clear_pc_layers();
             }
             0x31 => {
                 let slot = num(vm, self, 0);
@@ -321,7 +437,127 @@ impl Host for Engine {
                     c(num(vm, self, 2)),
                 ));
                 self.staged.background = None;
-                self.staged.characters.clear();
+                self.clear_pc_layers();
+            }
+            // Backlog entry; the visible text of these lines is in the
+            // pictures or the mail window.
+            0x04 => {}
+            0x20 => {
+                if !self.skipping {
+                    self.present_if_changed();
+                    self.mode = Mode::Click;
+                    return Control::Yield;
+                }
+            }
+            // Desktop shortcuts to other installed games; screen backup.
+            0x32 | 0x41 => {}
+            0x33 => {
+                let kind = num(vm, self, 0);
+                let at = (num(vm, self, 1), num(vm, self, 2));
+                if let Some(&(name, w, h, ms, wait, looping)) =
+                    usize::try_from(kind).ok().and_then(|k| pc::POPUPS.get(k))
+                    && let Some(frames) = self.assets.animation(name, w, h)
+                {
+                    self.present_if_changed();
+                    let popup = Popup {
+                        frames,
+                        at,
+                        start: self.frame,
+                        ticks: (u64::from(ms) * 60).div_ceil(1000).max(1),
+                        looping,
+                    };
+                    let end = self.frame + popup.length();
+                    self.popups.push(popup);
+                    if wait && !self.skipping {
+                        self.mode = Mode::Wait(end);
+                        return Control::Yield;
+                    }
+                }
+            }
+            0x34 => {
+                let label = Label {
+                    text: clean_text(&text(0)),
+                    rect: (
+                        num(vm, self, 1),
+                        num(vm, self, 2),
+                        num(vm, self, 3).max(0) as u32,
+                        num(vm, self, 4).max(0) as u32,
+                    ),
+                    size: num(vm, self, 5).clamp(8, 64) as f32,
+                    gap: num(vm, self, 6).clamp(0, 64) as f32,
+                };
+                self.stage_pc(|pc| {
+                    if pc.labels.len() < pc::MAX_LABELS {
+                        pc.labels.push(label);
+                    }
+                });
+            }
+            0x50 => {
+                let clock = text(0).trim().to_string();
+                self.stage_pc(|pc| pc.clock = Some(clock));
+            }
+            0x63 => self.stop(CHANNEL_SOUND),
+            0x65 => return self.wait_channel(CHANNEL_SOUND),
+            0x83 => self.stop(CHANNEL_VOICE),
+            0x85 => return self.wait_channel(CHANNEL_VOICE),
+            0xA0 | 0xA2 | 0xA4 => return self.chat_line(vm, args),
+            0xA1 => {
+                self.chat_log.clear();
+                self.stage_pc(|pc| pc.chat = None);
+            }
+            0xA3 => {
+                let tail = self.chat_tail();
+                self.stage_pc(|pc| pc.chat = Some(tail));
+            }
+            0xB0 | 0xB2 => {
+                if let Some(line) = self.line_arg(vm, args) {
+                    if number == 0xB0
+                        && let Some(voice) = args.iter().find_map(|&v| voice_after(vm, v))
+                    {
+                        let clip = self.assets.voice(&voice);
+                        self.play(CHANNEL_VOICE, clip);
+                    }
+                    self.mail_lines.push(line);
+                }
+            }
+            0xB1 => {
+                self.mail_lines.clear();
+                self.stage_pc(|pc| pc.mail = None);
+            }
+            0xB3 => {
+                let frame = pc::MAIL_FRAME.map(|name| self.assets.picture(name, &["img"]));
+                let mail = Mail {
+                    rect: (
+                        num(vm, self, 0),
+                        num(vm, self, 1),
+                        num(vm, self, 2).max(0) as u32,
+                        num(vm, self, 3).max(0) as u32,
+                    ),
+                    size: num(vm, self, 4).clamp(8, 64) as f32,
+                    gap: num(vm, self, 5).clamp(0, 64) as f32,
+                    lines: self.mail_lines.clone(),
+                    frame,
+                };
+                self.stage_pc(|pc| pc.mail = Some(mail));
+                // Scripts close the window right after; the player reads
+                // it first.
+                self.present_if_changed();
+                if !self.skipping {
+                    self.mode = Mode::Click;
+                    return Control::Yield;
+                }
+            }
+            0xC1 => {
+                self.letter.clear();
+                self.stage_pc(|pc| pc.letter = None);
+            }
+            0xC2 => self.letter.push(clean_text(&text(1))),
+            0xC3 => {
+                let page = usize::try_from(num(vm, self, 0))
+                    .ok()
+                    .and_then(|i| self.letter.get(i))
+                    .cloned();
+                self.stage_pc(|pc| pc.letter = page);
             }
             0x60 => {
                 let clip = self.assets.sound(&text(0));
@@ -431,6 +667,10 @@ impl Game {
             unknown: BTreeSet::new(),
             skipping: false,
             hidden: false,
+            chat_log: Vec::new(),
+            mail_lines: Vec::new(),
+            letter: Vec::new(),
+            popups: Vec::new(),
         };
         Ok(Self { title, vm, engine })
     }
@@ -517,6 +757,17 @@ impl Game {
             }
             Mode::Wait(until) => {
                 if frame.number >= *until || advance || skip {
+                    e.mode = Mode::Running;
+                }
+            }
+            Mode::Click => {
+                if advance || skip {
+                    e.mode = Mode::Running;
+                }
+            }
+            Mode::Channel(channel) => {
+                let playing = e.mixer.as_ref().is_some_and(|m| m.is_playing(*channel));
+                if !playing || advance || skip {
                     e.mode = Mode::Running;
                 }
             }
@@ -705,6 +956,9 @@ impl App for Game {
                 frame.canvas.blend_from(&faded, 255);
             }
         }
+        for popup in &self.engine.popups {
+            popup.draw(frame.canvas, frame.number);
+        }
         self.draw_title(frame.canvas);
         self.draw_text_box(frame.canvas);
         self.draw_end(frame.canvas);
@@ -737,6 +991,95 @@ mod tests {
                 hover: Some(2)
             }
         );
+    }
+
+    /// Plays the prologue clicking through (first option of every
+    /// choice) until `done` holds, for at most `limit` frames. Saves the
+    /// screen to `$VNR_SHOT_DIR/<name>.png` when that is set.
+    fn play_prologue_until(name: &str, limit: u64, done: impl Fn(&Engine) -> bool) -> Option<Game> {
+        let dir = std::env::var_os("ADV2_GAME_DIR")?;
+        let mut game = match Game::new(Path::new(&dir), "Pure Mail".into(), Some("PRO1"), None) {
+            Ok(g) => g,
+            Err(e) if e.to_string().contains("no Japanese font") => return None,
+            Err(e) => panic!("{e}"),
+        };
+        let mixer = Mixer::new(CHANNELS);
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        let (x, y, ..) = choice_rect(0);
+        let click = [InputEvent::MouseDown {
+            button: MouseButton::Left,
+            x: x + 5,
+            y: y + 5,
+        }];
+        for number in 0..limit {
+            let input: &[InputEvent] = if number % 20 == 19 { &click } else { &[] };
+            let mut frame = Frame {
+                number,
+                input,
+                canvas: &mut canvas,
+                mixer: &mixer,
+            };
+            game.update(&mut frame);
+            assert!(
+                !matches!(game.engine.mode, Mode::Ended(_)),
+                "{:?}",
+                game.engine.mode
+            );
+            if done(&game.engine) {
+                if let Some(out) = std::env::var_os("VNR_SHOT_DIR") {
+                    canvas
+                        .save_png(&Path::new(&out).join(format!("{name}.png")))
+                        .unwrap();
+                }
+                return Some(game);
+            }
+        }
+        panic!("{name}: not reached in {limit} frames");
+    }
+
+    /// Every `sys 33` pop-up decodes at its size (needs `ADV2_GAME_DIR`).
+    #[test]
+    fn popups_decode() {
+        let Some(dir) = std::env::var_os("ADV2_GAME_DIR") else {
+            eprintln!("ADV2_GAME_DIR not set, skipping");
+            return;
+        };
+        let mut assets = Assets::open(Path::new(&dir)).unwrap();
+        for (name, w, h, ..) in pc::POPUPS {
+            let frames = assets.animation(name, w, h).expect(name);
+            assert!(
+                frames.iter().all(|f| (f.width, f.height) == (w, h)),
+                "{name}"
+            );
+        }
+    }
+
+    /// The prologue opens the chat, then a mail from EVE (needs
+    /// `ADV2_GAME_DIR`).
+    #[test]
+    fn prologue_uses_the_pc() {
+        let chatting = |e: &Engine| {
+            e.mode == Mode::Click
+                && e.fade.is_none()
+                && e.shown.pc.chat.as_ref().is_some_and(|c| c.len() >= 10)
+        };
+        let Some(game) = play_prologue_until("chat", 40_000, chatting) else {
+            eprintln!("ADV2_GAME_DIR not set or no font, skipping");
+            return;
+        };
+        assert!(
+            game.engine
+                .chat_log
+                .iter()
+                .any(|l| l.text.contains("ＥＶＥ"))
+        );
+
+        let reading =
+            |e: &Engine| e.mode == Mode::Click && e.shown.pc.mail.is_some() && e.fade.is_none();
+        let game = play_prologue_until("mail", 80_000, reading).unwrap();
+        let mail = game.engine.shown.pc.mail.as_ref().unwrap();
+        assert_eq!(mail.lines[0].text, "ごめんなさい");
+        assert!(mail.lines.len() > 5);
     }
 
     /// Boots Pure Mail headless, picks "new game" and reads a few

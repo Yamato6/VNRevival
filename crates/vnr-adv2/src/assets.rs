@@ -6,8 +6,9 @@ use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 
+use overflow_adv2::anim::FrameEncoding;
 use overflow_adv2::script::Script;
-use overflow_adv2::{Pack, PixelFormat, audio, graphic};
+use overflow_adv2::{Anim, Image, Pack, PixelFormat, audio, graphic, image};
 use vnr_core::{BackendError, Clip, Color, Sprite};
 
 type PackFile = Pack<BufReader<File>>;
@@ -28,6 +29,7 @@ pub struct Assets {
     sound: Option<PackFile>,
     voice: Option<PackFile>,
     pictures: HashMap<String, Option<Arc<Sprite>>>,
+    animations: HashMap<String, Option<Arc<Vec<Sprite>>>>,
 }
 
 impl Assets {
@@ -41,6 +43,7 @@ impl Assets {
             sound: open_pack(root, "SOUND.DAT")?,
             voice: open_pack(root, "VOICE.DAT")?,
             pictures: HashMap::new(),
+            animations: HashMap::new(),
         })
     }
 
@@ -74,17 +77,40 @@ impl Assets {
                 .ok()?
                 .into_iter()
                 .next()?;
-            let image = picture.image;
-            Some(Arc::new(match image.format {
-                PixelFormat::Rgb8 => Sprite::from_rgb(image.width, image.height, &image.pixels),
-                PixelFormat::Rgba8 => Sprite::from_rgba(image.width, image.height, image.pixels),
-                PixelFormat::Gray8 => {
-                    Sprite::from_mask(image.width, image.height, &image.pixels, Color::WHITE)
-                }
-            }))
+            Some(Arc::new(to_sprite(picture.image)))
         });
         self.pictures.insert(key, sprite.clone());
         sprite
+    }
+
+    /// The frames of a small sequence animation (`stem.anim`), cut to
+    /// `width` × `height`. `None` if missing or undecodable.
+    pub fn animation(&mut self, stem: &str, width: u32, height: u32) -> Option<Arc<Vec<Sprite>>> {
+        let key = format!("{}|anim", stem.to_ascii_lowercase());
+        if let Some(cached) = self.animations.get(&key) {
+            return cached.clone();
+        }
+        let frames = (|| {
+            let entry = self.graphic.find(&format!("{stem}.anim"))?.clone();
+            let data = self.graphic.read(&entry).ok()?;
+            let anim = Anim::parse(&data).ok()?;
+            let mut frames = Vec::with_capacity(anim.frames.len());
+            for frame in &anim.frames {
+                let bytes = data.get(frame.offset..frame.offset + frame.size)?;
+                // Sequence frames are `.char` sprites; their rows end with
+                // an explicit marker, so the real size decodes them.
+                let image = match frame.encoding {
+                    FrameEncoding::Char => image::decode_char(bytes, width, height)
+                        .or_else(|_| anim.decode_frame(&data, frame)),
+                    FrameEncoding::Bgr => anim.decode_frame(&data, frame),
+                }
+                .ok()?;
+                frames.push(to_sprite(image));
+            }
+            (!frames.is_empty()).then(|| Arc::new(frames))
+        })();
+        self.animations.insert(key, frames.clone());
+        frames
     }
 
     /// A sound effect or music track from `SOUND.DAT`.
@@ -95,6 +121,17 @@ impl Assets {
     /// A voice from `VOICE.DAT`.
     pub fn voice(&mut self, name: &str) -> Option<Arc<Clip>> {
         load_clip(self.voice.as_mut()?, name)
+    }
+}
+
+/// A decoded image as a sprite; grey masks become white with alpha.
+fn to_sprite(image: Image) -> Sprite {
+    match image.format {
+        PixelFormat::Rgb8 => Sprite::from_rgb(image.width, image.height, &image.pixels),
+        PixelFormat::Rgba8 => Sprite::from_rgba(image.width, image.height, image.pixels),
+        PixelFormat::Gray8 => {
+            Sprite::from_mask(image.width, image.height, &image.pixels, Color::WHITE)
+        }
     }
 }
 

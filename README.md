@@ -74,10 +74,13 @@ functions of `pmail.obj`, branches and script changes all work (an
 automated walk covers the whole game without a machine error). Implemented
 on the engine side: the title menu, messages with speaker colours and
 voices, choices, backgrounds, character sprites, colour fills,
-cross-fades, waits, music, sound effects and voices. Still missing: the
-in-game PC (chat and mail windows), save/load, the backlog, settings and
+cross-fades, waits, music, sound effects and voices, and the in-game PC:
+the chat client, the mailer, letters, text labels, the taskbar clock and
+pop-up animations. Still missing: save/load, the backlog, settings and
 several effects; engine functions that are not implemented are skipped and
-reported once on the console.
+reported once on the console. The PC's layout comes from the game's own
+window graphics and the engine's handlers, but fonts and colours inside
+the windows are approximations.
 
 ### Fonts
 
@@ -128,9 +131,9 @@ overflow-adv2 = { path = "../VNTools-rs/overflow-adv2" }
 1. ✅ OverflowADV2 formats in VNTools-rs: images, audio, script bytecode.
 2. ✅ Runtime core: window, rendering and input on SDL2, Japanese text,
    audio mixing, headless runs with screenshots.
-3. Pure Mail playable: script interpreter (variables, expressions,
-   `pmail.obj` functions, the engine's `sys` calls), choices, save/load,
-   settings.
+3. Pure Mail playable. Done: script interpreter (variables, expressions,
+   `pmail.obj` functions, the engine's `sys` calls), choices, the in-game
+   PC. To do: save/load, backlog, settings.
 4. Video (Indeo 5 movies), mods and translations.
 5. More engines.
 

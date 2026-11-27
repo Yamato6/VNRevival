@@ -8,6 +8,7 @@
 pub mod assets;
 pub mod game;
 pub mod ini;
+pub mod pc;
 pub mod vm;
 
 use std::path::Path;
