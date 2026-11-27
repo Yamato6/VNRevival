@@ -11,7 +11,7 @@ VNRevival ships **no game data**.
 
 | Engine | Games | Status |
 |---|---|---|
-| OverflowADV2 (`adv2`) | Pure Mail (2001) | Detection only; runtime not started |
+| OverflowADV2 (`adv2`) | Pure Mail (2001) | Script preview (pictures, text, sound); interpreter in progress |
 
 ## How it fits together
 
@@ -27,9 +27,13 @@ VNTools-rs (format crates)      VNRevival
 * **[VNTools-rs](https://github.com/Yamato6/VNTools-rs)** holds the
   readers for each engine's file formats, plus extraction tools and the
   reverse-engineering notes. Formats are figured out there first.
-* **`vnr-core`** is engine-independent: the [`Backend`] interface and,
-  as it gets written, the shared runtime (window, rendering, text, audio,
-  input, saves, settings).
+* **`vnr-core`** is engine-independent: the [`Backend`] interface and the
+  shared runtime: a software compositor (`Canvas`, `Sprite`), a mixer for
+  44.1 kHz stereo clips with loops, Japanese text with system fonts, input
+  events, and the `App` trait a game implements. It knows nothing about
+  windows or devices, so it runs headless in tests.
+* **`vnrevival`** is the executable. It drives an `App` with SDL2 (window,
+  scaling, vsync, audio, input) or without any device for screenshots.
 * **`vnr-<engine>`** crates are backends: they use the format crates to
   turn an original engine's scripts and assets into what the runtime
   needs.
@@ -44,11 +48,52 @@ backend crate here; the runtime stays the same.
 ```sh
 cargo run --release -- engines             # list supported engines
 cargo run --release -- detect "<game dir>" # identify a game install
+cargo run --release -- run "<game dir>"    # play
 ```
+
+`run` options:
+
+| Option | Meaning |
+|---|---|
+| `--script NAME` | start from another script (Pure Mail: `PRO1` by default) |
+| `--font FILE` | font to use instead of the system's Japanese fonts |
+| `--scale N` | initial window size, 1–4 times the game resolution |
+| `--frames N` | run without a window for N frames (60 per second) |
+| `--screenshot FILE` | with `--frames`: save the last frame as PNG |
+| `--click-every N` | with `--frames`: click every N frames |
+
+In the window: click, Enter or Space advance the text, right-click hides
+the message window, Ctrl skips, Escape quits, Alt+Enter toggles full
+screen. The window can be resized; the picture keeps its aspect ratio.
+
+**Pure Mail today:** the script interpreter is not written yet, so `run`
+opens a *preview* that walks one script in a straight line: backgrounds,
+messages with the speaker colours from `OF_ADV2.INI`, chapter titles,
+waits, sound effects and voices. Branches, variables, the shared
+functions in `pmail.obj` (character sprites, music) and menus come with
+the interpreter.
+
+### Fonts
+
+The originals use Windows fonts (ＭＳ Ｐ明朝, ＭＳ Ｐゴシック). VNRevival
+looks for them, or a close substitute, where each system installs them:
+MS/Yu/BIZ UD fonts on Windows, IPA or Noto CJK on Linux (`fonts-ipafont`,
+`fonts-noto-cjk`), Hiragino on macOS. Use `--font` to pick a file.
 
 ## Building and testing
 
-Requires Rust 1.85 or newer.
+Requires Rust 1.85 or newer, plus **CMake** and a C compiler: SDL2 is
+built from source and linked statically (the `bundled` and `static-link`
+features of the `sdl2` crate), so the result has no SDL DLL to ship.
+
+* **Windows:** Visual Studio or its Build Tools. If `cmake` is not on
+  `PATH`, point the `CMAKE` environment variable at the one Visual Studio
+  ships (`Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe`),
+  for example in `.cargo/config.toml` under `[env]`.
+* **Linux:** `cmake` and the development headers SDL needs for a window
+  and sound, e.g. on Debian/Ubuntu
+  `sudo apt install cmake libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libwayland-dev libxkbcommon-dev libasound2-dev libpulse-dev`.
+* **macOS:** `brew install cmake`.
 
 ```sh
 cargo build --release
@@ -74,10 +119,12 @@ overflow-adv2 = { path = "../VNTools-rs/overflow-adv2" }
 
 ## Roadmap
 
-1. OverflowADV2 formats in VNTools-rs: images, audio, script bytecode.
-2. Runtime core: window, rendering and input on SDL, text with
-   Japanese fonts, audio mixing.
-3. Pure Mail playable: script interpreter, choices, save/load, settings.
+1. ✅ OverflowADV2 formats in VNTools-rs: images, audio, script bytecode.
+2. ✅ Runtime core: window, rendering and input on SDL2, Japanese text,
+   audio mixing, headless runs with screenshots.
+3. Pure Mail playable: script interpreter (variables, expressions,
+   `pmail.obj` functions, the engine's `sys` calls), choices, save/load,
+   settings.
 4. Video (Indeo 5 movies), mods and translations.
 5. More engines.
 

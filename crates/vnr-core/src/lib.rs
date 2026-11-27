@@ -2,8 +2,22 @@
 //!
 //! Every original engine (OverflowADV2, …) is supported by a *backend*: a
 //! crate that implements [`Backend`] and turns that engine's data into
-//! what the shared runtime needs. The runtime itself (window, rendering,
-//! audio, text, input, saves) will live here as it is written.
+//! what the shared runtime needs: an [`App`] that draws on a [`Canvas`],
+//! plays [`Clip`]s through the [`Mixer`] and reacts to [`InputEvent`]s.
+//!
+//! The runtime pieces here know nothing about windows or audio devices;
+//! the `vnrevival` binary drives them with SDL2, and [`run_headless`]
+//! drives them without any device, for tests and screenshots.
+
+pub mod app;
+pub mod audio;
+pub mod gfx;
+pub mod text;
+
+pub use app::{App, FPS, Flow, Frame, InputEvent, Key, MouseButton, run_headless};
+pub use audio::{Clip, FULL_VOLUME, Mixer};
+pub use gfx::{Canvas, Color, Sprite};
+pub use text::{Font, FontFamily, TextStyle};
 
 use std::error::Error;
 use std::fs;
@@ -38,6 +52,23 @@ pub trait Backend {
     /// Returns `Ok(None)` when the folder is not for this engine, and an
     /// error when it is but its data cannot be read.
     fn detect(&self, dir: &Path) -> Result<Option<GameInfo>, BackendError>;
+
+    /// Starts a game previously found by [`Backend::detect`].
+    fn launch(
+        &self,
+        game: &GameInfo,
+        options: &LaunchOptions,
+    ) -> Result<Box<dyn App>, BackendError>;
+}
+
+/// Settings that apply to every engine.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaunchOptions {
+    /// Where to start instead of the game's normal entry point (a script
+    /// name, engine-specific).
+    pub entry: Option<String>,
+    /// Font file to use instead of the installed system fonts.
+    pub font: Option<PathBuf>,
 }
 
 /// Finds `name` inside `dir`, ignoring ASCII case.

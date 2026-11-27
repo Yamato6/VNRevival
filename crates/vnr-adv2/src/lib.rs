@@ -1,11 +1,20 @@
 //! VNRevival backend for OverflowADV2, the engine of Pure Mail (2001).
 //!
 //! Data formats are read through the `overflow-adv2` crate from VNTools-rs.
+//!
+//! The script interpreter is not written yet; launching a game opens a
+//! [`preview::Preview`] of one script.
+
+pub mod ini;
+pub mod preview;
 
 use std::path::Path;
 
 use overflow_adv2::Pack;
-use vnr_core::{Backend, BackendError, GameInfo, find_ci, resolve_ci};
+use vnr_core::{App, Backend, BackendError, GameInfo, LaunchOptions, find_ci, resolve_ci};
+
+/// Script the preview starts with when none is given (the prologue).
+pub const DEFAULT_ENTRY: &str = "PRO1";
 
 /// Packs the engine loads, in the order they are reported.
 pub const PACKS: [&str; 4] = ["SCRIPT.DAT", "GRAPHIC.DAT", "SOUND.DAT", "VOICE.DAT"];
@@ -66,6 +75,17 @@ impl Backend for Adv2 {
             root: dir.to_path_buf(),
             details,
         }))
+    }
+
+    fn launch(
+        &self,
+        game: &GameInfo,
+        options: &LaunchOptions,
+    ) -> Result<Box<dyn App>, BackendError> {
+        let entry = options.entry.as_deref().unwrap_or(DEFAULT_ENTRY);
+        let preview =
+            preview::Preview::new(&game.root, game.title.clone(), entry, options.font.clone())?;
+        Ok(Box::new(preview))
     }
 }
 

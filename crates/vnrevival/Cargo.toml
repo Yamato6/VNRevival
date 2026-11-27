@@ -12,6 +12,7 @@ repository.workspace = true
 vnr-core.workspace = true
 vnr-adv2.workspace = true
 clap.workspace = true
+sdl2.workspace = true
 
 [lints]
 workspace = true

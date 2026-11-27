@@ -17,6 +17,9 @@ vnr-adv2 = { path = "crates/vnr-adv2" }
 # "Working on VNTools-rs at the same time" in the README.
 overflow-adv2 = { git = "https://github.com/Yamato6/VNTools-rs" }
 clap = { version = "4.5", features = ["derive"] }
+sdl2 = { version = "0.39", features = ["bundled", "static-link"] }
+fontdue = "0.9"
+png = "0.18"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
