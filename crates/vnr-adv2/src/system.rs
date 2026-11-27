@@ -17,7 +17,7 @@
 //! The original has no record of the music heard; VNRevival keeps one in
 //! `music.json` ([`HeardTracks`]) for its music room.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -397,6 +397,85 @@ impl SystemData {
         fs::rename(&temp, path)?;
         self.dirty = false;
         Ok(())
+    }
+}
+
+/// Messages read in any playthrough, so that skipping can stop at new
+/// text: for each script (lowercase name), the pool index of each
+/// message's text. Kept in `read.json`, written every few new messages
+/// and when dropped.
+#[derive(Debug, Default)]
+pub struct ReadMessages {
+    read: BTreeMap<String, BTreeSet<u16>>,
+    path: Option<PathBuf>,
+    /// New messages not written yet.
+    unsaved: usize,
+}
+
+/// New messages kept in memory before `read.json` is written again.
+const READ_BATCH: usize = 20;
+
+impl ReadMessages {
+    /// Reads `path`; empty if it is missing or unreadable.
+    pub fn open(path: PathBuf) -> Self {
+        let read = fs::read(&path)
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default();
+        Self {
+            read,
+            path: Some(path),
+            unsaved: 0,
+        }
+    }
+
+    pub fn is_read(&self, script: &str, index: u16) -> bool {
+        self.read
+            .get(&script.to_ascii_lowercase())
+            .is_some_and(|set| set.contains(&index))
+    }
+
+    /// Records a message; returns whether it had not been read before.
+    pub fn mark(&mut self, script: &str, index: u16) -> bool {
+        let new = self
+            .read
+            .entry(script.to_ascii_lowercase())
+            .or_default()
+            .insert(index);
+        if new {
+            self.unsaved += 1;
+            if self.unsaved >= READ_BATCH
+                && let Err(e) = self.flush()
+            {
+                eprintln!("could not save the messages read: {e}");
+            }
+        }
+        new
+    }
+
+    /// Writes the record if anything is new.
+    pub fn flush(&mut self) -> io::Result<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        if self.unsaved == 0 {
+            return Ok(());
+        }
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let json = serde_json::to_vec(&self.read).map_err(io::Error::other)?;
+        fs::write(path, json)?;
+        self.unsaved = 0;
+        Ok(())
+    }
+}
+
+impl Drop for ReadMessages {
+    fn drop(&mut self) {
+        if let Err(e) = self.flush() {
+            eprintln!("could not save the messages read: {e}");
+        }
     }
 }
 

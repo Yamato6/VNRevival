@@ -137,6 +137,16 @@ pub trait Session {
     /// Stops all sound (when leaving the game for the menu).
     fn silence(&mut self) {}
 
+    /// A picture for the game's card in the library (its title screen,
+    /// for example).
+    fn cover(&mut self) -> Option<Arc<Sprite>> {
+        None
+    }
+
+    /// Auto mode: messages move on by themselves once read (see
+    /// [`Settings::auto_wait`](crate::settings::Settings::auto_wait)).
+    fn set_auto(&mut self, _auto: bool) {}
+
     /// The game is hidden behind a screen of the interface (`true`) and
     /// does not run, or runs again. Sound that follows the game's clock,
     /// like a movie's, should hold meanwhile.

@@ -85,6 +85,36 @@ impl Sprite {
         }
     }
 
+    /// Reads a PNG file (8-bit RGB, RGBA, grey or grey with alpha).
+    pub fn load_png(path: &Path) -> std::io::Result<Self> {
+        let decoder = png::Decoder::new(std::io::BufReader::new(File::open(path)?));
+        let mut reader = decoder.read_info().map_err(std::io::Error::other)?;
+        let mut data = vec![0; reader.output_buffer_size().unwrap_or(0)];
+        let info = reader
+            .next_frame(&mut data)
+            .map_err(std::io::Error::other)?;
+        if info.bit_depth != png::BitDepth::Eight {
+            return Err(std::io::Error::other("only 8-bit PNG files are read"));
+        }
+        let data = &data[..info.buffer_size()];
+        let pixels: Vec<u8> = match info.color_type {
+            png::ColorType::Rgba => data.to_vec(),
+            png::ColorType::Rgb => data
+                .chunks_exact(3)
+                .flat_map(|p| [p[0], p[1], p[2], 255])
+                .collect(),
+            png::ColorType::Grayscale => data.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+            png::ColorType::GrayscaleAlpha => data
+                .chunks_exact(2)
+                .flat_map(|p| [p[0], p[0], p[0], p[1]])
+                .collect(),
+            png::ColorType::Indexed => {
+                return Err(std::io::Error::other("indexed PNG files are not read"));
+            }
+        };
+        Ok(Self::from_rgba(info.width, info.height, pixels))
+    }
+
     /// From an 8-bit mask: every pixel is `color`, with the mask as alpha.
     pub fn from_mask(width: u32, height: u32, mask: &[u8], color: Color) -> Self {
         assert_eq!(mask.len(), width as usize * height as usize);

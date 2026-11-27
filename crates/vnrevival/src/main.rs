@@ -1,8 +1,9 @@
 //! `vnrevival`: play old visual novels from your own copy.
 //!
-//! `run` opens a game in a window (SDL2), or runs it without one for a
-//! fixed number of frames and saves a screenshot (`--frames`). Every game
-//! is shown inside VNRevival's own interface ([`vnr_core::shell`]).
+//! `run` opens the game library, or a game folder directly, in a window
+//! (SDL2), or runs without one for a fixed number of frames and saves a
+//! screenshot (`--frames`). Every game is shown inside VNRevival's own
+//! interface ([`vnr_core::shell`]).
 
 mod sdl;
 
@@ -11,7 +12,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use vnr_core::shell::{Shell, ShellOptions};
-use vnr_core::{Backend, GameInfo, InputEvent, LaunchOptions, Mixer, MouseButton, Session, Start};
+use vnr_core::{
+    Backend, GameInfo, InputEvent, LaunchOptions, Launcher, Mixer, MouseButton, Session, Start,
+};
 
 /// Mixer channels opened for every game.
 const MIXER_CHANNELS: usize = 8;
@@ -32,10 +35,11 @@ enum Command {
     },
     /// List the supported engines.
     Engines,
-    /// Play a game.
+    /// Play: open the game library, or a game folder directly.
     Run {
-        /// Game install folder.
-        game: PathBuf,
+        /// Game install folder (it is added to the library); without it
+        /// the library opens.
+        game: Option<PathBuf>,
         /// Start from this script instead of the default (engine-specific).
         #[arg(long)]
         script: Option<String>,
@@ -99,7 +103,11 @@ fn main() -> ExitCode {
                 saves,
             };
             let clicks = click_every.map(|n| (n, click_at));
-            let result = shell(&game, &options, new_game).and_then(|mut shell| match frames {
+            let shell = match &game {
+                Some(game) => shell(game, &options, new_game),
+                None => launcher_shell(&options),
+            };
+            let result = shell.and_then(|mut shell| match frames {
                 Some(frames) => run_headless(&mut shell, frames, clicks, screenshot.as_deref()),
                 None => sdl::run(&mut shell, &Mixer::new(MIXER_CHANNELS), scale),
             });
@@ -144,7 +152,29 @@ fn open(dir: &Path, options: &LaunchOptions) -> Result<(GameInfo, Box<dyn Sessio
     Err(format!("no supported game found in {}", dir.display()))
 }
 
-/// The game in `dir` inside the universal interface.
+/// Every backend behind the library.
+struct Backends {
+    options: LaunchOptions,
+}
+
+impl Launcher for Backends {
+    fn detect(&self, dir: &Path) -> Result<Option<GameInfo>, String> {
+        detect(dir)
+    }
+
+    fn open(&self, game: &GameInfo) -> Result<Box<dyn Session>, String> {
+        let backend = backends()
+            .into_iter()
+            .find(|b| b.id() == game.engine)
+            .ok_or_else(|| format!("no backend {}", game.engine))?;
+        backend
+            .open(game, &self.options)
+            .map_err(|e| format!("{}: {e}", game.title))
+    }
+}
+
+/// The game in `dir` inside the universal interface (with the library
+/// behind "Change game").
 fn shell(dir: &Path, options: &LaunchOptions, new_game: bool) -> Result<Shell, String> {
     let (info, session) = open(dir, options)?;
     let font = vnr_core::shell::load_font(options.font.as_deref())?;
@@ -155,12 +185,35 @@ fn shell(dir: &Path, options: &LaunchOptions, new_game: bool) -> Result<Shell, S
         ShellOptions {
             data_dir: vnr_core::user_data_dir(),
             saves,
+            fixed_font: options.font.is_some(),
         },
+    );
+    shell.attach_launcher(
+        Box::new(Backends {
+            options: options.clone(),
+        }),
+        &info,
     );
     if new_game {
         shell.begin(Start::NewGame);
     }
     Ok(shell)
+}
+
+/// The game library.
+fn launcher_shell(options: &LaunchOptions) -> Result<Shell, String> {
+    let font = vnr_core::shell::load_font(options.font.as_deref())?;
+    Ok(Shell::launcher(
+        Box::new(Backends {
+            options: options.clone(),
+        }),
+        font,
+        ShellOptions {
+            data_dir: vnr_core::user_data_dir(),
+            saves: None,
+            fixed_font: options.font.is_some(),
+        },
+    ))
 }
 
 fn run_headless(
@@ -247,7 +300,7 @@ mod tests {
             saves: Some(scratch.join("saves")),
             ..LaunchOptions::default()
         };
-        let (_, session) = open(Path::new(&dir), &options).unwrap();
+        let (info, session) = open(Path::new(&dir), &options).unwrap();
         // Show every extra, seen or not.
         std::fs::create_dir_all(scratch.join("data")).unwrap();
         std::fs::write(
@@ -265,7 +318,14 @@ mod tests {
             ShellOptions {
                 data_dir: Some(scratch.join("data")),
                 saves: options.saves.clone(),
+                fixed_font: false,
             },
+        );
+        shell.attach_launcher(
+            Box::new(Backends {
+                options: options.clone(),
+            }),
+            &info,
         );
         let mixer = Mixer::new(MIXER_CHANNELS);
         let shots = std::env::var_os("VNR_SHOT_DIR");
@@ -309,9 +369,23 @@ mod tests {
             assert!(shell.in_game(), "{name} did not close");
         }
 
-        // Main menu (pause, 6th item), then the extras.
+        // The text and reading settings.
+        vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, key(Key::F(4)))]);
+        for (name, x) in [("settings-text", 700), ("settings-reading", 900)] {
+            let canvas = vnr_core::run_headless(&mut shell, &mixer, 2, &[(0, click(x, 160))]);
+            shoot(&canvas, name);
+        }
         vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, key(Key::Escape))]);
-        vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, click(600, 500))]);
+        // Auto mode, shown over the game.
+        let a = key(Key::Char('a'));
+        let canvas = vnr_core::run_headless(&mut shell, &mixer, 2, &[(0, a)]);
+        assert!(shell.auto());
+        shoot(&canvas, "auto");
+        vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, a)]);
+
+        // Main menu (pause, 7th item), then the extras.
+        vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, key(Key::Escape))]);
+        vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, click(600, 530))]);
         assert!(!shell.in_game());
         for (name, x, y) in [
             ("gallery", 600, 390),
@@ -330,6 +404,18 @@ mod tests {
         let canvas = vnr_core::run_headless(&mut shell, &mixer, 300, &[(0, click(334, 250))]);
         assert!(shell.in_game());
         shoot(&canvas, "replay");
+
+        // Leave the replay, then "Change game": the library, and the
+        // folder picker where the game was found.
+        vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, key(Key::Escape))]);
+        vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, click(600, 530))]);
+        vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, key(Key::Escape))]);
+        let canvas = vnr_core::run_headless(&mut shell, &mixer, 2, &[(0, click(600, 510))]);
+        assert!(!shell.in_game());
+        assert_eq!(shell.session().title(), "VNRevival");
+        shoot(&canvas, "library");
+        let canvas = vnr_core::run_headless(&mut shell, &mixer, 2, &[(0, click(800, 70))]);
+        shoot(&canvas, "picker");
         let _ = std::fs::remove_dir_all(scratch);
     }
 }

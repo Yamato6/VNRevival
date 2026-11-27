@@ -18,6 +18,7 @@ pub mod app;
 pub mod audio;
 pub mod gfx;
 pub mod lang;
+pub mod library;
 pub mod saves;
 pub mod session;
 pub mod settings;
@@ -31,8 +32,8 @@ pub use gfx::{Canvas, Color, Sprite};
 pub use session::{
     GalleryEntry, HistoryEntry, ReplayScene, SaveData, Session, SessionEvent, Start, Track,
 };
-pub use settings::Settings;
-pub use text::{Font, FontFamily, TextStyle};
+pub use settings::{Outline, Settings};
+pub use text::{Font, FontChoice, FontFamily, TextStyle};
 
 use std::error::Error;
 use std::fs;
@@ -111,11 +112,21 @@ pub fn user_data_dir() -> Option<PathBuf> {
     }
 }
 
-/// Default folder for one game's saves: `<user data>/saves/<engine>-<title>`,
-/// with the title reduced to lowercase ASCII letters, digits and dashes.
+/// Default folder for one game's saves: `<user data>/saves/<engine>-<title>`
+/// (see [`game_slug`]).
 pub fn save_dir(game: &GameInfo) -> Option<PathBuf> {
+    Some(
+        user_data_dir()?
+            .join("saves")
+            .join(game_slug(game.engine, &game.title)),
+    )
+}
+
+/// `<engine>-<title>`, with the title reduced to lowercase ASCII letters,
+/// digits and dashes: a file name for things kept per game.
+pub fn game_slug(engine: &str, title: &str) -> String {
     let mut slug = String::new();
-    for c in game.title.chars() {
+    for c in title.chars() {
         if c.is_ascii_alphanumeric() {
             slug.push(c.to_ascii_lowercase());
         } else if !slug.ends_with('-') {
@@ -123,12 +134,21 @@ pub fn save_dir(game: &GameInfo) -> Option<PathBuf> {
         }
     }
     let slug = slug.trim_matches('-');
-    let name = if slug.is_empty() {
-        game.engine.to_string()
+    if slug.is_empty() {
+        engine.to_string()
     } else {
-        format!("{}-{slug}", game.engine)
-    };
-    Some(user_data_dir()?.join("saves").join(name))
+        format!("{engine}-{slug}")
+    }
+}
+
+/// Finds and opens games for the library: the frontend implements it on
+/// top of every [`Backend`].
+pub trait Launcher {
+    /// The game in `dir`, if a backend recognises it.
+    fn detect(&self, dir: &Path) -> Result<Option<GameInfo>, String>;
+
+    /// Opens a game found by [`Launcher::detect`].
+    fn open(&self, game: &GameInfo) -> Result<Box<dyn Session>, String>;
 }
 
 /// Finds `name` inside `dir`, ignoring ASCII case.

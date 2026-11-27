@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audio::FULL_VOLUME;
 use crate::lang::Language;
+use crate::text::FontChoice;
 
 /// Highest level of the level settings.
 pub const MAX_LEVEL: u8 = 10;
@@ -24,7 +25,29 @@ pub enum StartScreen {
     Original,
 }
 
-/// The settings. Levels go from 0 to [`MAX_LEVEL`].
+/// How text is set off from the picture behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outline {
+    /// No shadow at all.
+    Off,
+    /// A drop shadow where the game has one.
+    #[default]
+    Shadow,
+    /// A dark border all around every character.
+    Outline,
+}
+
+/// Highest step of [`Settings::text_size`] and [`Settings::line_spacing`].
+pub const MAX_STEP: u8 = 4;
+
+/// Game text size in pixels (of an 800 × 600 game) per step.
+const TEXT_SIZES: [f32; 5] = [18.0, 20.0, 22.0, 26.0, 30.0];
+/// Line height as a multiple of the text size, per step.
+const LINE_SPACINGS: [f32; 5] = [1.2, 1.28, 1.36, 1.55, 1.8];
+
+/// The settings. Levels go from 0 to [`MAX_LEVEL`], steps to
+/// [`MAX_STEP`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -41,6 +64,21 @@ pub struct Settings {
     pub text_speed: u8,
     /// Opacity of the message window.
     pub window: u8,
+    /// Font of the interface and of the game text.
+    pub font: FontChoice,
+    /// Size of the game text (step).
+    pub text_size: u8,
+    /// Space between lines (step).
+    pub line_spacing: u8,
+    pub outline: Outline,
+    /// Opaque black message window with white text.
+    pub high_contrast: bool,
+    /// How fast auto mode moves on.
+    pub auto_speed: u8,
+    /// Auto mode waits for the voice to end.
+    pub wait_voice: bool,
+    /// Skipping (Ctrl) also skips text not read yet.
+    pub skip_unread: bool,
 }
 
 impl Default for Settings {
@@ -56,6 +94,14 @@ impl Default for Settings {
             voice: MAX_LEVEL,
             text_speed: 5,
             window: 6,
+            font: FontChoice::default(),
+            text_size: 2,
+            line_spacing: 2,
+            outline: Outline::default(),
+            high_contrast: false,
+            auto_speed: 5,
+            wait_voice: true,
+            skip_unread: false,
         }
     }
 }
@@ -71,9 +117,31 @@ impl Settings {
         (u32::from(FULL_VOLUME) * u32::from(level.min(MAX_LEVEL)) / u32::from(MAX_LEVEL)) as u16
     }
 
-    /// Message window alpha.
+    /// Message window alpha (opaque in high contrast).
     pub fn window_alpha(&self) -> u8 {
+        if self.high_contrast {
+            return 255;
+        }
         (u32::from(self.window.min(MAX_LEVEL)) * 255 / u32::from(MAX_LEVEL)) as u8
+    }
+
+    /// Game text size in pixels, for a game drawn at 800 × 600.
+    pub fn text_px(&self) -> f32 {
+        TEXT_SIZES[usize::from(self.text_size.min(MAX_STEP))]
+    }
+
+    /// Line height for text of `size` pixels.
+    pub fn line_height(&self, size: f32) -> f32 {
+        (size * LINE_SPACINGS[usize::from(self.line_spacing.min(MAX_STEP))]).round()
+    }
+
+    /// Frames auto mode waits once a message of `chars` characters is
+    /// fully shown (at 60 frames per second).
+    pub fn auto_wait(&self, chars: usize) -> u64 {
+        let fast = f32::from(self.auto_speed.min(MAX_LEVEL));
+        let base = 2.5 - fast * 0.2;
+        let per_char = 0.09 - fast * 0.006;
+        ((base + per_char * chars as f32) * 60.0).round() as u64
     }
 
     /// Reads the settings; defaults if the file is missing or unreadable.
@@ -113,6 +181,11 @@ mod tests {
         let partial = Settings::load(&path);
         assert_eq!(partial.music, 2);
         assert_eq!(partial.voice, MAX_LEVEL);
+        // Files from before the accessibility settings keep the defaults.
+        assert_eq!(partial.font, FontChoice::NotoSansJp);
+        assert_eq!((partial.text_px(), partial.line_height(22.0)), (22.0, 30.0));
+        assert_eq!(partial.outline, Outline::Shadow);
+        assert!(partial.wait_voice && !partial.skip_unread);
         fs::remove_dir_all(dir).unwrap();
         assert_eq!(Settings::load(&path), Settings::default());
     }
@@ -127,5 +200,28 @@ mod tests {
         };
         assert!(instant.chars_per_second().is_none());
         assert!(Settings::default().chars_per_second().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn text_and_reading_helpers() {
+        let mut s = Settings {
+            text_size: 9,
+            ..Settings::default()
+        };
+        assert_eq!(s.text_px(), 30.0);
+        s.high_contrast = true;
+        assert_eq!(s.window_alpha(), 255);
+        // Faster auto mode waits less; longer messages wait more.
+        let slow = Settings {
+            auto_speed: 0,
+            ..Settings::default()
+        };
+        let fast = Settings {
+            auto_speed: MAX_LEVEL,
+            ..Settings::default()
+        };
+        assert!(slow.auto_wait(20) > fast.auto_wait(20));
+        assert!(fast.auto_wait(60) > fast.auto_wait(10));
+        assert!(fast.auto_wait(0) >= 30);
     }
 }

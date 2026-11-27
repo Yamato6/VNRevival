@@ -36,6 +36,8 @@ pub enum Key {
     Backspace,
     /// Function keys F1–F12.
     F(u8),
+    /// A letter key, lowercase (`'a'`–`'z'`).
+    Char(char),
 }
 
 /// One input event, in canvas coordinates.

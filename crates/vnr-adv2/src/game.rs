@@ -45,11 +45,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use vnr_core::settings::StartScreen;
-use vnr_core::text::find_system_font;
 use vnr_core::{
-    BackendError, Canvas, Clip, Color, Font, FontFamily, Frame, GalleryEntry, HistoryEntry,
-    InputEvent, Key, Mixer, MouseButton, ReplayScene, SaveData, Session, SessionEvent,
-    Settings as PlayerSettings, Sprite, Start, TextStyle, Track,
+    BackendError, Canvas, Clip, Color, Font, FontChoice, FontFamily, Frame, GalleryEntry,
+    HistoryEntry, InputEvent, Key, Mixer, MouseButton, Outline, ReplayScene, SaveData, Session,
+    SessionEvent, Settings as PlayerSettings, Sprite, Start, TextStyle, Track,
 };
 
 use crate::assets::Assets;
@@ -60,7 +59,7 @@ use crate::names::Names;
 use crate::options::GameOptions;
 use crate::pc::{self, Label, Line, Mail, PcView, Popup};
 use crate::save::{self, EngineState, SaveFile, SavedMode, SceneState};
-use crate::system::{self, HeardTracks, SystemData};
+use crate::system::{self, HeardTracks, ReadMessages, SystemData};
 use crate::transition::{self, Effect, MorningPictures, Transition};
 use crate::vm::{Control, Host, Machine, Status, Value};
 
@@ -84,37 +83,49 @@ const GAME_VARIABLES_END: u16 = 0x4000;
 /// Script with the shared functions, loaded first.
 const LIBRARY: &str = "pmail";
 const STEP_BUDGET: usize = 200_000;
-const TEXT_SIZE: f32 = 22.0;
-const LINE_HEIGHT: f32 = 30.0;
+/// The message box of the original; it grows upwards (up to
+/// [`BOX_TOP`]) when larger text needs more room.
 const BOX: (i32, i32, u32, u32) = (20, 424, 760, 166);
+const BOX_TOP: i32 = 200;
+/// Space between the box edge and the text.
+const BOX_PADDING: f32 = 12.0;
 /// Background picture formats: `.crgb`, and one `.dib` (`hiro17`).
 const BACKGROUND: &[&str] = &["crgb", "dib"];
 
+/// The fonts of the game text: one font for everything, or with the
+/// original fonts one per family (the ini gives each speaker style a
+/// mincho or a gothic font).
 struct Fonts {
-    mincho: Font,
     gothic: Font,
+    mincho: Option<Font>,
+    /// The setting they come from; `None` for a font given with `--font`.
+    choice: Option<FontChoice>,
 }
 
 impl Fonts {
-    fn load(override_path: Option<&Path>) -> Result<Self, BackendError> {
-        let load = |family| -> Result<Font, BackendError> {
-            let (path, index) = match override_path {
-                Some(path) => (path.to_path_buf(), 0),
-                None => find_system_font(family)
-                    .ok_or("no Japanese font found on this system; pass one with --font")?,
-            };
-            Ok(Font::load(&path, index)?)
+    fn load(path: Option<&Path>, choice: FontChoice) -> Result<Self, BackendError> {
+        if let Some(path) = path {
+            return Ok(Self {
+                gothic: Font::load(path, 0)?,
+                mincho: None,
+                choice: None,
+            });
+        }
+        let mincho = match choice {
+            FontChoice::Original => Some(choice.load(FontFamily::Mincho)?),
+            _ => None,
         };
         Ok(Self {
-            mincho: load(FontFamily::Mincho)?,
-            gothic: load(FontFamily::Gothic)?,
+            gothic: choice.load(FontFamily::Gothic)?,
+            mincho,
+            choice: Some(choice),
         })
     }
 
     fn get(&mut self, family: FontFamily) -> &mut Font {
-        match family {
-            FontFamily::Mincho => &mut self.mincho,
-            FontFamily::Gothic => &mut self.gothic,
+        match (family, &mut self.mincho) {
+            (FontFamily::Mincho, Some(mincho)) => mincho,
+            _ => &mut self.gothic,
         }
     }
 }
@@ -273,6 +284,14 @@ pub struct Engine {
     root: PathBuf,
     /// The movie playing.
     movie: Option<Movie>,
+    /// Messages read in any playthrough.
+    read: ReadMessages,
+    /// Auto mode (set by the interface).
+    auto: bool,
+    /// Frame when the message on screen was fully shown.
+    message_done: Option<u64>,
+    /// Characters to read at the current click wait (for auto mode).
+    click_chars: usize,
 }
 
 impl Engine {
@@ -467,6 +486,15 @@ impl Engine {
         self.staged.pc_revision += 1;
     }
 
+    /// Waits for a click on text of `chars` characters (auto mode waits
+    /// as for a message that long).
+    fn wait_click(&mut self, chars: usize) -> Control {
+        self.message_done = None;
+        self.click_chars = chars;
+        self.mode = Mode::Click;
+        Control::Yield
+    }
+
     /// Adds a chat line, shows the log and waits for a click.
     fn chat_line(&mut self, vm: &Machine, args: &[Value]) -> Control {
         let Some(line) = self.line_arg(vm, args) else {
@@ -477,6 +505,7 @@ impl Engine {
             let clip = self.assets.voice(voice);
             self.play(CHANNEL_VOICE, clip);
         }
+        let chars = line.text.chars().count();
         self.history.push(Entry {
             speaker: None,
             text: line.text.clone(),
@@ -489,8 +518,7 @@ impl Engine {
         if self.skipping {
             return Control::Continue;
         }
-        self.mode = Mode::Click;
-        Control::Yield
+        self.wait_click(chars)
     }
 
     /// The end of the chat log: enough lines to fill the window.
@@ -511,6 +539,14 @@ impl Engine {
 
     fn message(&mut self, vm: &mut Machine) -> Control {
         let logged = vm.take_log_values();
+        // The message is known by the pool entry of its first text.
+        let key = logged
+            .iter()
+            .find(|v| vm.text(**v).is_some())
+            .and_then(|v| {
+                let script = self.script_names.get(&v.script())?;
+                Some((script.clone(), v.low()))
+            });
         let mut text = String::new();
         let mut voice = None;
         for value in &logged {
@@ -531,6 +567,15 @@ impl Engine {
         if text.trim().is_empty() {
             return Control::Continue;
         }
+        if let Some((script, index)) = key {
+            let new = self.read.mark(&script, index);
+            // Skipping stops at text not read before, unless the player
+            // asked to skip everything.
+            if new && self.skipping && !self.fast_start && !self.player.skip_unread {
+                self.skipping = false;
+            }
+        }
+        self.message_done = None;
         self.present_if_changed();
         self.window_visible = true;
         let speaker = self.names.expand(&self.speaker.1);
@@ -707,8 +752,7 @@ impl Host for Engine {
             0x20 => {
                 if !self.skipping {
                     self.present_if_changed();
-                    self.mode = Mode::Click;
-                    return Control::Yield;
+                    return self.wait_click(0);
                 }
             }
             // Desktop shortcuts to other installed games; screen backup.
@@ -807,8 +851,8 @@ impl Host for Engine {
                 // it first.
                 self.present_if_changed();
                 if !self.skipping {
-                    self.mode = Mode::Click;
-                    return Control::Yield;
+                    let chars = self.mail_lines.iter().map(|l| l.text.chars().count()).sum();
+                    return self.wait_click(chars);
                 }
             }
             0xC1 => {
@@ -921,13 +965,24 @@ fn title_button_rect(i: usize) -> (i32, i32, u32, u32) {
     (188, 330 + i as i32 * 70, 423, 55)
 }
 
-fn choice_rect(i: usize) -> (i32, i32, u32, u32) {
-    let (x, y, w, _) = BOX;
+/// The message box for content `height` pixels tall.
+fn message_box(height: f32) -> (i32, i32, u32, u32) {
+    let (x, y, w, h) = BOX;
+    let bottom = y + h as i32;
+    let needed = ((height + 2.0 * BOX_PADDING).ceil() as i32)
+        .max(h as i32)
+        .min(bottom - BOX_TOP);
+    (x, bottom - needed, w, needed as u32)
+}
+
+/// Option `i` of `count`, with lines `line` pixels tall.
+fn choice_rect(i: usize, count: usize, line: f32) -> (i32, i32, u32, u32) {
+    let (x, y, w, _) = message_box(count as f32 * line);
     (
         x + 10,
-        y + 12 + i as i32 * LINE_HEIGHT as i32,
+        y + BOX_PADDING as i32 + (i as f32 * line) as i32,
         w - 20,
-        LINE_HEIGHT as u32,
+        line as u32,
     )
 }
 
@@ -968,7 +1023,7 @@ impl Game {
         let engine = Engine {
             assets,
             settings,
-            fonts: Fonts::load(font.as_deref())?,
+            fonts: Fonts::load(font.as_deref(), FontChoice::default())?,
             mixer: None,
             frame: 0,
             mode: Mode::Running,
@@ -1003,6 +1058,10 @@ impl Game {
             reveal: 0.0,
             root: root.to_path_buf(),
             movie: None,
+            read: ReadMessages::default(),
+            auto: false,
+            message_done: None,
+            click_chars: 0,
         };
         Ok(Self {
             title,
@@ -1030,6 +1089,7 @@ impl Game {
         }
         self.engine.options = GameOptions::load(dir);
         self.engine.heard = HeardTracks::open(dir.join("music.json"));
+        self.engine.read = ReadMessages::open(dir.join("read.json"));
     }
 
     /// Loads the scripts and starts `script` from a clean state.
@@ -1249,6 +1309,11 @@ impl Game {
         }
         let skip = e.skipping;
         let step = e.reveal_step();
+        let voice_busy = e.player.wait_voice
+            && e.mixer
+                .as_ref()
+                .is_some_and(|m| m.is_playing(CHANNEL_VOICE));
+        let line = e.player.line_height(e.player.text_px());
         let mut answer: Option<(Option<u16>, i32)> = None;
         match &mut e.mode {
             Mode::Message { text, shown, .. } => {
@@ -1260,8 +1325,15 @@ impl Game {
                     if skip {
                         e.mode = Mode::Running;
                     }
-                } else if advance || skip {
-                    e.mode = Mode::Running;
+                } else {
+                    // Auto mode: move on after a time that grows with the
+                    // text (and once the voice has ended).
+                    let done = *e.message_done.get_or_insert(frame.number);
+                    let auto =
+                        e.auto && !voice_busy && frame.number >= done + e.player.auto_wait(total);
+                    if advance || skip || auto {
+                        e.mode = Mode::Running;
+                    }
                 }
             }
             Mode::Choice {
@@ -1269,11 +1341,14 @@ impl Game {
                 variable,
                 hover,
             } => {
+                let count = options.len();
                 if let Some((x, y)) = pointer {
-                    *hover = (0..options.len()).find(|&i| hit(choice_rect(i), x, y));
+                    *hover = (0..options.len()).find(|&i| hit(choice_rect(i, count, line), x, y));
                 }
                 let picked = match click {
-                    Some((x, y)) => (0..options.len()).find(|&i| hit(choice_rect(i), x, y)),
+                    Some((x, y)) => {
+                        (0..options.len()).find(|&i| hit(choice_rect(i, count, line), x, y))
+                    }
                     None if advance => *hover,
                     None => None,
                 };
@@ -1303,7 +1378,11 @@ impl Game {
                 }
             }
             Mode::Click => {
-                if advance || skip {
+                let done = *e.message_done.get_or_insert(frame.number);
+                let auto = e.auto
+                    && !voice_busy
+                    && frame.number >= done + e.player.auto_wait(e.click_chars);
+                if advance || skip || auto {
                     e.mode = Mode::Running;
                 }
             }
@@ -1348,6 +1427,7 @@ impl Game {
                 size: 18.0,
                 color: Color::WHITE,
                 shadow: Some(Color::BLACK),
+                outline: false,
                 bold: false,
             };
             let chapter = e.names.expand(&e.chapter);
@@ -1358,60 +1438,69 @@ impl Game {
         if e.hidden || !e.window_visible {
             return;
         }
-        let (x, y, w, h) = BOX;
+        let size = e.player.text_px();
+        let line = e.player.line_height(size);
+        let contrast = e.player.high_contrast;
+        let window = if contrast {
+            Color::BLACK
+        } else {
+            e.settings
+                .message_window()
+                .with_opacity(e.player.window_alpha())
+        };
+        let outline = e.player.outline;
+        // The game's colour and shadow, then the player's text settings.
+        let style = |color: Color, shadow: bool, bold: bool| TextStyle {
+            size,
+            color: if contrast { Color::WHITE } else { color },
+            shadow: match outline {
+                Outline::Off => None,
+                Outline::Shadow => shadow.then_some(Color::BLACK),
+                Outline::Outline => Some(Color::BLACK),
+            },
+            outline: outline == Outline::Outline,
+            bold,
+        };
         match &e.mode {
             Mode::Message {
                 text,
                 speaker,
-                style,
+                style: n,
                 shown,
             } => {
-                canvas.fill_rect(
-                    x,
-                    y,
-                    w,
-                    h,
-                    e.settings
-                        .message_window()
-                        .with_opacity(e.player.window_alpha()),
-                );
-                let cs = e.settings.char_style(*style);
-                let ts = TextStyle {
-                    size: TEXT_SIZE,
-                    color: cs.color,
-                    shadow: cs.shadow.then_some(Color::BLACK),
-                    bold: cs.bold,
-                };
+                let cs = e.settings.char_style(*n);
+                let ts = style(cs.color, cs.shadow, cs.bold);
                 let font = e.fonts.get(cs.family);
-                let mut top = y as f32 + 12.0;
+                let width = BOX.2 as f32 - 40.0;
+                // The box fits the whole message, so it does not grow
+                // while the text appears.
+                let lines = font.wrap(text, size, width).len() + usize::from(speaker.is_some());
+                let (x, y, w, h) = message_box(lines as f32 * line);
+                canvas.fill_rect(x, y, w, h, window);
+                let bottom = (y + h as i32) as f32 - BOX_PADDING;
+                let mut top = y as f32 + BOX_PADDING;
                 let left = x as f32 + 20.0;
                 if let Some(speaker) = speaker {
                     font.draw_line(canvas, left, top, speaker, ts);
-                    top += LINE_HEIGHT;
+                    top += line;
                 }
                 let visible: String = text.chars().take(*shown).collect();
-                for line in font
-                    .wrap(&visible, TEXT_SIZE, w as f32 - 40.0)
-                    .iter()
-                    .take(5)
-                {
-                    font.draw_line(canvas, left, top, line, ts);
-                    top += LINE_HEIGHT;
+                for text_line in font.wrap(&visible, size, width) {
+                    if top + size > bottom + 2.0 {
+                        break;
+                    }
+                    font.draw_line(canvas, left, top, &text_line, ts);
+                    top += line;
                 }
             }
             Mode::Choice { options, hover, .. } => {
-                canvas.fill_rect(
-                    x,
-                    y,
-                    w,
-                    h,
-                    e.settings
-                        .message_window()
-                        .with_opacity(e.player.window_alpha()),
-                );
+                let count = options.len();
+                let (x, y, w, h) = message_box(count as f32 * line);
+                canvas.fill_rect(x, y, w, h, window);
                 let cs = e.settings.char_style(0);
+                let ts = style(cs.color, true, false);
                 for (i, option) in options.iter().enumerate() {
-                    let rect = choice_rect(i);
+                    let rect = choice_rect(i, count, line);
                     if *hover == Some(i) {
                         canvas.fill_rect(
                             rect.0,
@@ -1421,16 +1510,10 @@ impl Game {
                             Color::rgba(255, 255, 255, 60),
                         );
                     }
-                    let ts = TextStyle {
-                        size: TEXT_SIZE,
-                        color: cs.color,
-                        shadow: Some(Color::BLACK),
-                        bold: false,
-                    };
                     e.fonts.get(cs.family).draw_line(
                         canvas,
                         rect.0 as f32 + 10.0,
-                        rect.1 as f32 + 2.0,
+                        rect.1 as f32 + (line - size) / 2.0,
                         &format!("{}. {option}", i + 1),
                         ts,
                     );
@@ -1463,6 +1546,7 @@ impl Game {
             size: 18.0,
             color: Color::WHITE,
             shadow: Some(Color::BLACK),
+            outline: false,
             bold: false,
         };
         let reason = reason.clone();
@@ -1628,10 +1712,29 @@ impl Session for Game {
     fn apply(&mut self, settings: &PlayerSettings) {
         self.engine.player = settings.clone();
         self.engine.apply_volumes();
+        let fonts = &self.engine.fonts;
+        if fonts.choice.is_some_and(|c| c != settings.font) {
+            match Fonts::load(None, settings.font) {
+                Ok(fonts) => self.engine.fonts = fonts,
+                Err(e) => eprintln!("{e}"),
+            }
+        }
     }
 
     fn silence(&mut self) {
         self.engine.stop_all();
+        if let Err(e) = self.engine.read.flush() {
+            eprintln!("could not save the messages read: {e}");
+        }
+    }
+
+    fn set_auto(&mut self, auto: bool) {
+        self.engine.auto = auto;
+    }
+
+    fn cover(&mut self) -> Option<Arc<Sprite>> {
+        // The title screen's background.
+        self.engine.assets.picture("TITL00a", &["crgb"])
     }
 
     fn freeze(&mut self, frozen: bool) {
@@ -1798,7 +1901,7 @@ mod tests {
         game.start(Start::NewGame).unwrap();
         let mixer = Mixer::new(CHANNELS);
         let mut canvas = Canvas::new(WIDTH, HEIGHT);
-        let (x, y, ..) = choice_rect(0);
+        let (x, y, ..) = choice_rect(0, 1, 30.0);
         let click = [click_at(x + 5, y + 5)];
         for number in 0..limit {
             let input: &[InputEvent] = if number % 20 == 19 { &click } else { &[] };
@@ -1814,6 +1917,176 @@ mod tests {
             }
         }
         panic!("{name}: not reached in {limit} frames");
+    }
+
+    /// Larger text, an outline and high contrast: the box grows to fit
+    /// a long message (needs `ADV2_GAME_DIR`).
+    #[test]
+    fn text_settings_reshape_the_message_box() {
+        let long_message = |e: &Engine| match &e.mode {
+            Mode::Message { text, shown, .. } => {
+                *shown >= text.chars().count() && text.chars().count() >= 60
+            }
+            _ => false,
+        };
+        let Some(mut game) = play_prologue_until("text-default", 40_000, long_message) else {
+            eprintln!("ADV2_GAME_DIR not set or no font, skipping");
+            return;
+        };
+        let mixer = Mixer::new(CHANNELS);
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        let settings = PlayerSettings {
+            text_size: vnr_core::settings::MAX_STEP,
+            line_spacing: vnr_core::settings::MAX_STEP,
+            outline: Outline::Outline,
+            high_contrast: true,
+            ..PlayerSettings::default()
+        };
+        game.apply(&settings);
+        step(&mut game, &mixer, &mut canvas, 1, &[]);
+        shoot(&canvas, "text-large");
+        let Mode::Message { text, speaker, .. } = game.engine.mode.clone() else {
+            panic!("{:?}", game.engine.mode);
+        };
+        let size = settings.text_px();
+        let line = settings.line_height(size);
+        let lines = game
+            .engine
+            .fonts
+            .get(FontFamily::Gothic)
+            .wrap(&text, size, 720.0)
+            .len()
+            + usize::from(speaker.is_some());
+        let (_, y, _, h) = message_box(lines as f32 * line);
+        assert!(y < BOX.1, "{lines} lines of {line} px fit the original box");
+        assert!(h as f32 >= lines as f32 * line);
+        // High contrast: an opaque black box.
+        assert_eq!(canvas.pixel(25, y as u32 + 2), Color::BLACK);
+
+        // The original fonts can still be picked.
+        game.apply(&PlayerSettings {
+            font: FontChoice::Original,
+            ..PlayerSettings::default()
+        });
+        assert_eq!(game.engine.fonts.choice, Some(FontChoice::Original));
+        step(&mut game, &mixer, &mut canvas, 2, &[]);
+        shoot(&canvas, "text-original");
+    }
+
+    fn showing_message(e: &Engine) -> bool {
+        matches!(&e.mode, Mode::Message { text, shown, .. } if *shown >= text.chars().count())
+    }
+
+    /// Auto mode moves on by itself, and waits for the voice when asked
+    /// (needs `ADV2_GAME_DIR`).
+    #[test]
+    fn auto_mode_advances_messages() {
+        let Some(mut game) = play_prologue_until("auto", 40_000, showing_message) else {
+            eprintln!("ADV2_GAME_DIR not set or no font, skipping");
+            return;
+        };
+        // The mixer the game took on its first frame.
+        let mixer = game.engine.mixer.clone().unwrap();
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        let entries = game.history().len();
+        game.apply(&PlayerSettings {
+            wait_voice: false,
+            ..PlayerSettings::default()
+        });
+        game.set_auto(true);
+        // The slowest wait for a long message is well under 10 seconds.
+        let mut number = 100_000;
+        while game.history().len() == entries && number < 100_600 {
+            step(&mut game, &mixer, &mut canvas, number, &[]);
+            number += 1;
+        }
+        assert!(game.history().len() > entries, "auto mode did not move on");
+
+        // Waiting for the voice: nothing happens while it plays.
+        game.apply(&PlayerSettings::default());
+        let mut waited = 0;
+        while !showing_message(&game.engine) && waited < 2_000 {
+            step(&mut game, &mixer, &mut canvas, number, &[]);
+            number += 1;
+            waited += 1;
+        }
+        let entries = game.history().len();
+        mixer.play(CHANNEL_VOICE, Arc::new(Clip::mono(&[0; 4])), 256);
+        for _ in 0..1_000 {
+            step(&mut game, &mixer, &mut canvas, number, &[]);
+            number += 1;
+        }
+        assert_eq!(game.history().len(), entries, "auto mode did not wait");
+        mixer.stop(CHANNEL_VOICE);
+        for _ in 0..600 {
+            step(&mut game, &mixer, &mut canvas, number, &[]);
+            number += 1;
+        }
+        assert!(
+            game.history().len() > entries,
+            "{:?} voice {}",
+            game.engine.mode,
+            mixer.is_playing(CHANNEL_VOICE)
+        );
+    }
+
+    /// Holding Ctrl stops at text not read before, and skips text read in
+    /// an earlier playthrough (needs `ADV2_GAME_DIR`).
+    #[test]
+    fn skipping_stops_at_unread_text() {
+        let dir = std::env::temp_dir().join(format!("vnr-adv2-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let play = |ctrl_from: u64, frames: u64, skip_unread: bool| -> Option<(Game, usize)> {
+            let mut game = open(Some("PRO1"))?;
+            game.set_data_dir(Some(dir.clone()));
+            game.apply(&PlayerSettings {
+                skip_unread,
+                ..PlayerSettings::default()
+            });
+            game.start(Start::NewGame).unwrap();
+            let mixer = Mixer::new(CHANNELS);
+            let mut canvas = Canvas::new(WIDTH, HEIGHT);
+            let (x, y, ..) = choice_rect(0, 1, 30.0);
+            let click = [click_at(x + 5, y + 5)];
+            let ctrl = [InputEvent::KeyDown(Key::Control)];
+            for number in 0..frames {
+                let input: &[InputEvent] = if number == ctrl_from {
+                    &ctrl
+                } else if number < ctrl_from && number % 20 == 19 {
+                    &click
+                } else {
+                    &[]
+                };
+                step(&mut game, &mixer, &mut canvas, number, input);
+            }
+            let read = game.history().len();
+            Some((game, read))
+        };
+        // First playthrough: read some messages by clicking.
+        let Some((first, read)) = play(u64::MAX, 3_000, false) else {
+            eprintln!("ADV2_GAME_DIR not set or no font, skipping");
+            return;
+        };
+        assert!(read >= 5, "only {read} messages read");
+        drop(first);
+        assert!(dir.join("read.json").is_file());
+
+        // Second: Ctrl from the start passes what was read and stops at
+        // the first new message.
+        let (game, reached) = play(1, 3_000, false).unwrap();
+        assert!(!game.engine.skipping, "still skipping");
+        assert_eq!(
+            reached,
+            read + 1,
+            "stopped elsewhere than the first new message"
+        );
+        drop(game);
+
+        // Skipping unread text too: it does not stop there.
+        let (game, reached) = play(1, 3_000, true).unwrap();
+        assert!(reached > read + 1, "stopped at unread text");
+        drop(game);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn chatting(e: &Engine) -> bool {
@@ -2083,7 +2356,7 @@ mod tests {
         let mixer = Mixer::new(CHANNELS);
         let mut canvas = Canvas::new(WIDTH, HEIGHT);
         let skip = [InputEvent::KeyDown(Key::Control)];
-        let (x, y, ..) = choice_rect(0);
+        let (x, y, ..) = choice_rect(0, 1, 30.0);
         let pick = [click_at(x + 5, y + 5)];
         for number in 0..20_000 {
             let input: &[InputEvent] = match number {

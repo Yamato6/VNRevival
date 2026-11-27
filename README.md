@@ -29,9 +29,10 @@ VNTools-rs (format crates)      VNRevival
   reverse-engineering notes. Formats are figured out there first.
 * **`vnr-core`** is engine-independent: the [`Backend`] interface, the
   shared runtime (a software compositor, a mixer for 44.1 kHz stereo
-  clips with loops, Japanese text with system fonts, input events) and
-  the **universal interface**, `Shell`: the main menu, pause menu, save
-  slots, message history and settings, the same for every game. A game
+  clips with loops, Japanese text with installed fonts, input events)
+  and the **universal interface**, `Shell`: the game library, main menu,
+  pause menu, save slots, message history, settings and extras, the same
+  for every game. A game
   is a `Session` that only plays itself; the shell shows its screen
   scaled inside a 1280 × 720 interface. Nothing here knows about windows
   or devices, so it runs headless in tests.
@@ -51,15 +52,25 @@ backend crate here; the runtime and the interface stay the same.
 ```sh
 cargo run --release -- engines             # list supported engines
 cargo run --release -- detect "<game dir>" # identify a game install
-cargo run --release -- run "<game dir>"    # play
+cargo run --release -- run                 # the game library
+cargo run --release -- run "<game dir>"    # play a game directly
 ```
+
+`run` without a folder opens the **library**: the games you added, with
+their cover and when you last played. "Add game…" opens a folder
+picker: go to the folder where the game is installed (the one with its
+`.exe` and data) and "Use this folder" once it shows the game's name.
+Click a game to play it; the × on a card takes it out of the library
+(its files are not touched). `run <folder>` opens that game at once and
+adds it to the library. In a game's main menu, "Change game" goes back
+to the library.
 
 `run` options:
 
 | Option | Meaning |
 |---|---|
 | `--script NAME` | start from another script instead of the normal entry point |
-| `--font FILE` | font to use instead of the system's Japanese fonts |
+| `--font FILE` | font file to use instead of the font setting |
 | `--scale N` | initial window size, 1–3 times 1280 × 720 |
 | `--new-game` | skip VNRevival's menu and start a new game |
 | `--saves DIR` | folder for saved games instead of the default one |
@@ -72,9 +83,11 @@ A game opens on VNRevival's main menu (new game, load, extras,
 settings, quit); the settings can switch to the game's own title screen
 instead.
 
-In a game: click, Enter or Space advance the text, Ctrl skips, the middle
-button hides the message window. Escape or right-click open the pause
-menu (save, load, history, settings, main menu, quit). Shortcuts: F2
+In a game: click, Enter or Space advance the text, Ctrl skips (it stops
+at text you have not read before, unless the settings say otherwise), A
+turns auto mode on or off, the middle button hides the message window.
+Escape or right-click open the pause menu (save, load, history, auto
+mode, settings, main menu, quit). Shortcuts: F2
 saves, F3 loads, F4 opens the settings, the wheel up or Page Up opens the
 message history (click a marked line to hear its voice again). Escape or
 right-click close any screen; Alt+Enter toggles full screen. The window
@@ -129,11 +142,23 @@ scene is the opening movie.
 
 ### Settings
 
-The settings screen (F4) has three tabs: **System** (interface language:
-English, Spanish or Japanese; what to show at start; full screen; unlock
-all extras), **Sound** (master, music, sound effect and voice volumes)
-and **Text** (text speed, message window opacity). They apply to every
-game and are kept in `settings.json` in the user data folder
+The settings screen (F4) has four tabs:
+
+* **System**: interface language (English, Spanish or Japanese), what to
+  show at start (VNRevival's menu or the game's title), full screen,
+  unlock all extras.
+* **Sound**: master, music, sound effect and voice volumes.
+* **Text**, with a preview: font, text size (18 to 30 pixels of game
+  text), line spacing, text edge (none, shadow or a full outline), high
+  contrast (an opaque black window with white text) and window opacity.
+  The message window grows upwards when larger text needs the room.
+* **Reading**: text speed, auto mode speed, whether auto mode waits for
+  the voice to end, and whether skipping also skips text not read yet.
+  VNRevival remembers what you have read in every playthrough
+  (`read.json` next to the saves).
+
+They apply to every game and are kept in `settings.json` in the user
+data folder
 (`%APPDATA%\VNRevival` on Windows, `~/Library/Application
 Support/VNRevival` on macOS, `~/.local/share/vnrevival` elsewhere).
 
@@ -146,10 +171,17 @@ the hero's names in `options.json`.
 
 ### Fonts
 
-The originals use Windows fonts (ＭＳ Ｐ明朝, ＭＳ Ｐゴシック). VNRevival
-looks for them, or a close substitute, where each system installs them:
-MS/Yu/BIZ UD fonts on Windows, IPA or Noto CJK on Linux (`fonts-ipafont`,
-`fonts-noto-cjk`), Hiragino on macOS. Use `--font` to pick a file.
+The interface and the game text use **Noto Sans JP** by default. The
+font setting offers the fonts that are installed among Noto Sans JP,
+Noto Serif JP, BIZ UDPGothic, BIZ UDPMincho, Yu Gothic and Meiryo, and
+**Original**: the fonts the game asked for (ＭＳ Ｐ明朝, ＭＳ Ｐゴシック),
+or the closest substitute installed. When the chosen font is missing the
+next one available is used. Variable fonts (such as `NotoSansJP-VF.ttf`
+from Google Fonts) are drawn at a regular weight, with a real bold.
+
+Noto Sans JP is free (SIL Open Font License): install it from Google
+Fonts on Windows and macOS, or `fonts-noto-cjk` on Linux. `--font`
+picks a font file instead of the setting.
 
 ## Building and testing
 
@@ -198,10 +230,11 @@ indeo = { path = "../VNTools-rs/indeo" }
    `pmail.obj` functions, the engine's `sys` calls), choices, the in-game
    PC, the opening movie. To do: the remaining engine functions and
    effects.
-4. Universal interface. Done: main menu, pause menu, save slots, history,
-   settings, interface languages, CG gallery, music room, scene replay.
-   To do: a game library with a folder picker, text input for names,
-   a user manual.
+4. Universal interface. Done: game library with a folder picker, main
+   menu, pause menu, save slots, history, settings, interface languages,
+   CG gallery, music room, scene replay; accessibility (fonts, text size,
+   line spacing, outline, high contrast, auto mode, skipping only read
+   text). To do: text input for names, a user manual.
 5. Mods and translations.
 6. More engines.
 

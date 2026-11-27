@@ -103,6 +103,7 @@ pub fn style(size: f32, color: Color) -> TextStyle {
         size,
         color,
         shadow: Some(Color::rgba(0, 0, 0, 160)),
+        outline: false,
         bold: false,
     }
 }

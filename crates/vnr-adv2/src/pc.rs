@@ -154,6 +154,7 @@ fn plain(size: f32, color: Color) -> TextStyle {
         size,
         color,
         shadow: None,
+        outline: false,
         bold: false,
     }
 }

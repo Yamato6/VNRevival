@@ -13,6 +13,7 @@
 //! open the history.
 
 mod extras;
+mod library;
 
 pub use extras::MUSIC_CHANNEL;
 
@@ -24,11 +25,13 @@ use crate::app::{App, Flow, Frame, InputEvent, Key, MouseButton};
 use crate::audio::Mixer;
 use crate::gfx::{Canvas, Color, Sprite};
 use crate::lang::{Language, Strings};
+use crate::library::Library;
 use crate::saves::{SLOTS, SlotSummary, Slots};
 use crate::session::{HistoryEntry, Session, SessionEvent, Start};
-use crate::settings::{MAX_LEVEL, Settings, StartScreen};
-use crate::text::{Font, FontFamily, find_system_font};
+use crate::settings::{MAX_LEVEL, MAX_STEP, Outline, Settings, StartScreen};
+use crate::text::{Font, FontChoice, FontFamily, TextStyle};
 use crate::ui::{self, Rect, State, theme};
+use crate::{GameInfo, Launcher};
 
 /// Where the shell keeps its files.
 #[derive(Debug, Clone, Default)]
@@ -38,6 +41,9 @@ pub struct ShellOptions {
     pub data_dir: Option<PathBuf>,
     /// The game's save folder; `None` disables saving.
     pub saves: Option<PathBuf>,
+    /// The font was chosen on the command line: the font setting does not
+    /// replace it.
+    pub fixed_font: bool,
 }
 
 /// A change of the window the shell asks the frontend for.
@@ -49,13 +55,10 @@ pub struct WindowRequest {
 /// Loads the interface font: `path` if given, else an installed
 /// Japanese gothic font (game texts in the history are Japanese).
 pub fn load_font(path: Option<&Path>) -> Result<Font, String> {
-    let (path, index) = match path {
-        Some(path) => (path.to_path_buf(), 0),
-        None => find_system_font(FontFamily::Gothic)
-            .or_else(|| find_system_font(FontFamily::Mincho))
-            .ok_or("no Japanese font found on this system; pass one with --font")?,
-    };
-    Font::load(&path, index)
+    match path {
+        Some(path) => Font::load(path, 0),
+        None => FontChoice::default().load(FontFamily::Gothic),
+    }
 }
 
 const MENU_ITEMS: [&str; 6] = [
@@ -66,19 +69,21 @@ const MENU_ITEMS: [&str; 6] = [
     "menu.library",
     "menu.quit",
 ];
-const PAUSE_ITEMS: [&str; 7] = [
+const PAUSE_ITEMS: [&str; 8] = [
     "pause.resume",
     "pause.save",
     "pause.load",
     "pause.history",
+    "pause.auto",
     "pause.settings",
     "pause.menu",
     "pause.quit",
 ];
-const TABS: [&str; 3] = [
+const TABS: [&str; 4] = [
     "settings.tab.system",
     "settings.tab.sound",
     "settings.tab.screen",
+    "settings.tab.reading",
 ];
 
 /// One setting row.
@@ -94,6 +99,14 @@ enum Setting {
     Voice,
     TextSpeed,
     Window,
+    Font,
+    TextSize,
+    LineSpacing,
+    Outline,
+    HighContrast,
+    AutoSpeed,
+    WaitVoice,
+    SkipUnread,
 }
 
 impl Setting {
@@ -111,8 +124,41 @@ impl Setting {
                 Setting::Sound,
                 Setting::Voice,
             ],
-            _ => &[Setting::TextSpeed, Setting::Window],
+            2 => &[
+                Setting::Font,
+                Setting::TextSize,
+                Setting::LineSpacing,
+                Setting::Outline,
+                Setting::HighContrast,
+                Setting::Window,
+            ],
+            _ => &[
+                Setting::TextSpeed,
+                Setting::AutoSpeed,
+                Setting::WaitVoice,
+                Setting::SkipUnread,
+            ],
         }
+    }
+
+    /// Highest value of a level setting.
+    fn max(self) -> u8 {
+        match self {
+            Setting::TextSize | Setting::LineSpacing => MAX_STEP,
+            _ => MAX_LEVEL,
+        }
+    }
+
+    /// Value of an on/off setting.
+    fn toggle(self, s: &mut Settings) -> Option<&mut bool> {
+        Some(match self {
+            Setting::Fullscreen => &mut s.fullscreen,
+            Setting::UnlockAll => &mut s.unlock_all,
+            Setting::HighContrast => &mut s.high_contrast,
+            Setting::WaitVoice => &mut s.wait_voice,
+            Setting::SkipUnread => &mut s.skip_unread,
+            _ => return None,
+        })
     }
 
     fn key(self) -> &'static str {
@@ -127,6 +173,14 @@ impl Setting {
             Setting::Voice => "settings.voice",
             Setting::TextSpeed => "settings.text_speed",
             Setting::Window => "settings.window",
+            Setting::Font => "settings.font",
+            Setting::TextSize => "settings.text_size",
+            Setting::LineSpacing => "settings.line_spacing",
+            Setting::Outline => "settings.outline",
+            Setting::HighContrast => "settings.high_contrast",
+            Setting::AutoSpeed => "settings.auto_speed",
+            Setting::WaitVoice => "settings.wait_voice",
+            Setting::SkipUnread => "settings.skip_unread",
         }
     }
 
@@ -138,6 +192,9 @@ impl Setting {
             Setting::Voice => &mut s.voice,
             Setting::TextSpeed => &mut s.text_speed,
             Setting::Window => &mut s.window,
+            Setting::TextSize => &mut s.text_size,
+            Setting::LineSpacing => &mut s.line_spacing,
+            Setting::AutoSpeed => &mut s.auto_speed,
             _ => return None,
         })
     }
@@ -161,12 +218,28 @@ impl Setting {
                     StartScreen::Original => StartScreen::Universal,
                 }
             }
-            Setting::Fullscreen => s.fullscreen = !s.fullscreen,
-            Setting::UnlockAll => s.unlock_all = !s.unlock_all,
+            Setting::Font => {
+                let all = FontChoice::installed();
+                let i = all.iter().position(|&f| f == s.font).unwrap_or(0);
+                let n = all.len();
+                s.font = all[if forward {
+                    (i + 1) % n
+                } else {
+                    (i + n - 1) % n
+                }];
+            }
+            Setting::Outline => {
+                const ALL: [Outline; 3] = [Outline::Off, Outline::Shadow, Outline::Outline];
+                let i = ALL.iter().position(|&o| o == s.outline).unwrap_or(1);
+                s.outline = ALL[if forward { (i + 1) % 3 } else { (i + 2) % 3 }];
+            }
             other => {
-                if let Some(level) = other.level(s) {
+                let max = other.max();
+                if let Some(on) = other.toggle(s) {
+                    *on = !*on;
+                } else if let Some(level) = other.level(s) {
                     *level = if forward {
-                        (*level + 1).min(MAX_LEVEL)
+                        (*level + 1).min(max)
                     } else {
                         level.saturating_sub(1)
                     };
@@ -208,6 +281,9 @@ enum Screen {
         rows: Vec<HistoryRow>,
         /// First row shown.
         scroll: usize,
+        /// Text size and row height, from the text settings.
+        size: f32,
+        row: i32,
     },
     Settings {
         tab: usize,
@@ -215,6 +291,8 @@ enum Screen {
     },
     Extras(extras::Extras),
     Viewer(extras::Viewer),
+    Library(library::LibraryScreen),
+    Picker(library::Picker),
 }
 
 /// What a screen asks for after its input.
@@ -227,7 +305,46 @@ enum Action {
     Load(usize),
     /// Leave the game for the main menu.
     ToMenu,
+    /// Replace the top screen.
+    Replace(Screen),
+    /// Leave the game for the library.
+    ChangeGame,
+    /// Open a game of the library.
+    OpenGame(PathBuf),
     Quit,
+}
+
+/// The session when no game is open (the library is on screen).
+struct NoGame;
+
+impl Session for NoGame {
+    fn title(&self) -> String {
+        "VNRevival".into()
+    }
+
+    fn resolution(&self) -> (u32, u32) {
+        (800, 600)
+    }
+
+    fn start(&mut self, _start: Start) -> Result<(), String> {
+        Err("no game is open".into())
+    }
+
+    fn update(&mut self, _frame: &mut Frame<'_>) -> SessionEvent {
+        SessionEvent::ToMenu
+    }
+
+    fn can_save(&self) -> bool {
+        false
+    }
+
+    fn save(&self) -> Result<crate::session::SaveData, String> {
+        Err("no game is open".into())
+    }
+
+    fn load(&mut self, _data: &crate::session::SaveData) -> Result<(), String> {
+        Err("no game is open".into())
+    }
 }
 
 /// The universal interface: see the [module docs](self).
@@ -257,23 +374,39 @@ pub struct Shell {
     replaying: bool,
     /// The game is in progress but a screen covers it.
     frozen: bool,
+    /// The font comes from the command line.
+    fixed_font: bool,
+    /// Auto mode is on.
+    auto: bool,
+    /// Finds and opens games for the library, when there is one.
+    launcher: Option<Box<dyn Launcher>>,
+    library: Library,
+    /// Install folder of the open game, when it came from the launcher.
+    game_root: Option<PathBuf>,
 }
 
 /// History layout.
 const HISTORY_PANEL: Rect = Rect::new(140, 40, 1000, 640);
+/// History text size for the default game text size (22).
 const HISTORY_SIZE: f32 = 20.0;
-const HISTORY_ROW: i32 = 30;
 const HISTORY_GAP: i32 = 12;
 const HISTORY_TOP: i32 = HISTORY_PANEL.y + 80;
 const HISTORY_BOTTOM: i32 = HISTORY_PANEL.y + 640 - 50;
 
 impl Shell {
     pub fn new(session: Box<dyn Session>, font: Font, options: ShellOptions) -> Self {
-        let settings = options
+        let mut font = font;
+        let settings: Settings = options
             .data_dir
             .as_ref()
             .map(|d| Settings::load(&d.join("settings.json")))
             .unwrap_or_default();
+        if !options.fixed_font && settings.font != FontChoice::default() {
+            match settings.font.load(FontFamily::Gothic) {
+                Ok(chosen) => font = chosen,
+                Err(e) => eprintln!("{e}"),
+            }
+        }
         let lang_dir = options.data_dir.as_ref().map(|d| d.join("lang"));
         let strings = Strings::new(settings.language, lang_dir.as_deref());
         let (w, h) = session.resolution();
@@ -287,6 +420,11 @@ impl Shell {
             thumbs: HashMap::new(),
             replaying: false,
             frozen: false,
+            fixed_font: options.fixed_font,
+            auto: false,
+            launcher: None,
+            library: Library::open(options.data_dir.clone()),
+            game_root: None,
             game: Canvas::new(w, h),
             game_frame: 0,
             started: false,
@@ -304,6 +442,89 @@ impl Shell {
             mixer: None,
             quit: false,
         }
+    }
+
+    /// The launcher alone: the library of games is the first screen.
+    pub fn launcher(launcher: Box<dyn Launcher>, font: Font, options: ShellOptions) -> Self {
+        let mut shell = Self::new(Box::new(NoGame), font, options);
+        shell.launcher = Some(launcher);
+        shell.started = true;
+        shell.screens = vec![shell.library_screen()];
+        shell
+    }
+
+    /// Gives a shell opened on a game the launcher, so that "Change game"
+    /// works; the game is added to the library.
+    pub fn attach_launcher(&mut self, launcher: Box<dyn Launcher>, game: &GameInfo) {
+        self.launcher = Some(launcher);
+        self.library.add(game);
+        self.library.touch(&game.root);
+        if self.library.last_folder().is_none()
+            && let Some(parent) = game.root.parent()
+        {
+            self.library.set_last_folder(parent);
+        }
+        self.game_root = Some(game.root.clone());
+        self.store_cover();
+    }
+
+    /// Saves the open game's cover in the library, once.
+    fn store_cover(&mut self) {
+        let Some(root) = self.game_root.clone() else {
+            return;
+        };
+        if let Some(cover) = self.session.cover()
+            && let Err(e) = self.library.save_cover(&root, &cover)
+        {
+            eprintln!("could not save the cover: {e}");
+        }
+    }
+
+    /// Opens the game in `root` from the library.
+    fn open_game(&mut self, root: &Path) -> Result<(), String> {
+        let launcher = self.launcher.as_ref().ok_or("no launcher")?;
+        let info = launcher
+            .detect(root)?
+            .ok_or_else(|| format!("no supported game in {} any more", root.display()))?;
+        let session = launcher.open(&info)?;
+        self.set_session(session);
+        self.slots = crate::save_dir(&info).map(Slots::new);
+        self.library.touch(root);
+        self.game_root = Some(root.to_path_buf());
+        self.store_cover();
+        self.screens.clear();
+        match self.settings.start {
+            StartScreen::Original => self.start(Start::OriginalTitle),
+            StartScreen::Universal => self.screens.push(Screen::MainMenu { focus: None }),
+        }
+        Ok(())
+    }
+
+    /// Puts `session` in place of the current one, before it starts.
+    fn set_session(&mut self, session: Box<dyn Session>) {
+        let mut session = session;
+        self.extras = !(session.gallery().is_empty()
+            && session.tracks().is_empty()
+            && session.scenes().is_empty());
+        let (w, h) = session.resolution();
+        self.session = session;
+        self.game = Canvas::new(w, h);
+        self.game_frame = 0;
+        self.in_game = false;
+        self.replaying = false;
+        self.frozen = false;
+        self.auto = false;
+        self.thumbs.clear();
+        self.apply_settings();
+    }
+
+    /// Closes the game and shows the library.
+    fn change_game(&mut self) {
+        self.session.silence();
+        self.set_session(Box::new(NoGame));
+        self.slots = None;
+        self.game_root = None;
+        self.screens = vec![self.library_screen()];
     }
 
     /// Starts the game at once instead of showing the start screen of
@@ -326,7 +547,14 @@ impl Shell {
     pub fn set_settings(&mut self, settings: Settings) {
         let language = self.settings.language;
         let fullscreen = self.settings.fullscreen;
+        let font = self.settings.font;
         self.settings = settings;
+        if self.settings.font != font && !self.fixed_font {
+            match self.settings.font.load(FontFamily::Gothic) {
+                Ok(chosen) => self.font = chosen,
+                Err(e) => eprintln!("{e}"),
+            }
+        }
         if self.settings.language != language {
             let dir = self.data_dir.as_ref().map(|d| d.join("lang"));
             self.strings = Strings::new(self.settings.language, dir.as_deref());
@@ -410,6 +638,7 @@ impl Shell {
 
     fn back_to_menu(&mut self) {
         self.session.silence();
+        self.set_auto(false);
         if self.replaying {
             self.end_replay();
             return;
@@ -426,6 +655,7 @@ impl Shell {
     /// Back to the scene list after a replayed scene.
     fn end_replay(&mut self) {
         self.replaying = false;
+        self.set_auto(false);
         self.in_game = false;
         self.session.silence();
         let list = self.extras_screen(false, extras::SCENES);
@@ -454,6 +684,8 @@ impl Shell {
             return None;
         }
         let width = HISTORY_PANEL.w as f32 - 120.0;
+        let size = (self.settings.text_px() * HISTORY_SIZE / 22.0).round();
+        let row = self.settings.line_height(size) as i32 + 3;
         let mut rows = Vec::new();
         for (i, entry) in entries.iter().enumerate() {
             let mut gap = HISTORY_GAP;
@@ -469,7 +701,7 @@ impl Shell {
             }
             for (n, line) in self
                 .font
-                .wrap(&entry.text, HISTORY_SIZE, width)
+                .wrap(&entry.text, size, width)
                 .into_iter()
                 .enumerate()
             {
@@ -483,11 +715,13 @@ impl Shell {
                 gap = 0;
             }
         }
-        let scroll = history_last_page(&rows);
+        let scroll = history_last_page(&rows, row);
         Some(Screen::History {
             entries,
             rows,
             scroll,
+            size,
+            row,
         })
     }
 
@@ -566,6 +800,10 @@ impl Shell {
                 {
                     self.history_screen()
                 }
+                InputEvent::KeyDown(Key::Char('a')) => {
+                    self.set_auto(!self.auto);
+                    None
+                }
                 _ => None,
             };
             if let Some(screen) = screen {
@@ -615,6 +853,18 @@ impl Shell {
                 self.finish_slot(result, true);
             }
             Action::ToMenu => self.back_to_menu(),
+            Action::Replace(screen) => {
+                self.screens.pop();
+                self.screens.push(screen);
+            }
+            Action::ChangeGame => self.change_game(),
+            Action::OpenGame(root) => {
+                if let Err(e) = self.open_game(&root)
+                    && let Some(Screen::Library(lib)) = self.screens.last_mut()
+                {
+                    lib.error = Some(e);
+                }
+            }
             Action::Quit => self.quit = true,
         }
     }
@@ -652,6 +902,8 @@ impl Shell {
         match screen {
             Screen::Extras(ex) => return self.extras_input(ex, input),
             Screen::Viewer(v) => return self.viewer_input(v, input),
+            Screen::Library(lib) => return self.library_input(lib, input),
+            Screen::Picker(p) => return self.picker_input(p, input),
             Screen::MainMenu { focus } => {
                 let rects = menu_rects();
                 for event in input {
@@ -667,6 +919,7 @@ impl Shell {
                                 tab: 0,
                                 focus: None,
                             }),
+                            "menu.library" => Action::ChangeGame,
                             "menu.quit" => Action::Quit,
                             _ => continue,
                         });
@@ -695,6 +948,10 @@ impl Shell {
                                 focus: None,
                             }),
                             "pause.menu" => Action::ToMenu,
+                            "pause.auto" => {
+                                self.set_auto(!self.auto);
+                                Action::Close
+                            }
                             _ => Action::Quit,
                         };
                         actions.push(action);
@@ -726,8 +983,10 @@ impl Shell {
                 entries,
                 rows,
                 scroll,
+                row,
+                ..
             } => {
-                let last = history_last_page(rows);
+                let (row_h, last) = (*row, history_last_page(rows, *row));
                 for event in input {
                     match *event {
                         _ if back(event) => actions.push(Action::Close),
@@ -751,9 +1010,9 @@ impl Shell {
                             x,
                             y,
                         } => {
-                            let hit = history_layout(rows, *scroll)
+                            let hit = history_layout(rows, *scroll, row_h)
                                 .find(|(_, top, row)| {
-                                    (top..&(top + HISTORY_ROW)).contains(&&y)
+                                    (top..&(top + row_h)).contains(&&y)
                                         && x >= HISTORY_PANEL.x
                                         && x < HISTORY_PANEL.right()
                                         && entries[row.entry].voice.is_some()
@@ -798,9 +1057,10 @@ impl Shell {
                                 *focus = Some(i);
                                 let setting = rows[i];
                                 let bar = level_rect(i);
+                                let max = setting.max();
                                 if let Some(level) = setting.level(&mut settings) {
                                     if (bar.x..bar.right() + 8).contains(&x) {
-                                        *level = ui::level_at(bar, MAX_LEVEL, x);
+                                        *level = ui::level_at(bar, max, x);
                                     }
                                 } else {
                                     let back_half = x < bar.x + bar.w as i32 / 3;
@@ -842,7 +1102,7 @@ impl Shell {
         match MENU_ITEMS[i] {
             "menu.load" => self.slots.is_some(),
             "menu.extras" => self.extras,
-            "menu.library" => false,
+            "menu.library" => self.launcher.is_some(),
             _ => true,
         }
     }
@@ -856,12 +1116,35 @@ impl Shell {
         }
     }
 
+    /// Turns auto mode on or off.
+    fn set_auto(&mut self, auto: bool) {
+        self.auto = auto;
+        self.session.set_auto(auto);
+    }
+
+    /// Whether auto mode is on.
+    pub fn auto(&self) -> bool {
+        self.auto
+    }
+
     fn draw(&mut self, canvas: &mut Canvas) {
         canvas.clear(theme::BACKDROP);
         if self.in_game {
             canvas.clear(Color::BLACK);
             let v = self.viewport();
             canvas.draw_scaled(&self.game, v.x, v.y, v.w, v.h);
+            if self.auto {
+                let text = self.strings.get("game.auto").to_string();
+                let badge = Rect::new(v.right() - 96, v.y + 8, 84, 30);
+                canvas.fill_rect(
+                    badge.x,
+                    badge.y,
+                    badge.w,
+                    badge.h,
+                    Color::rgba(0, 0, 0, 150),
+                );
+                ui::label_centered(canvas, &mut self.font, badge, &text, 18.0, theme::ACCENT);
+            }
             if !self.screens.is_empty() {
                 canvas.fill_rect(0, 0, ui::WIDTH, ui::HEIGHT, theme::DIM);
             }
@@ -878,6 +1161,8 @@ impl Shell {
         match screen {
             Screen::Extras(ex) => self.draw_extras(canvas, ex),
             Screen::Viewer(v) => self.draw_viewer(canvas, v),
+            Screen::Library(lib) => self.draw_library(canvas, lib),
+            Screen::Picker(p) => self.draw_picker(canvas, p),
             Screen::MainMenu { focus } => {
                 let title = self.session.title();
                 let f = &mut self.font;
@@ -1005,15 +1290,18 @@ impl Shell {
                 entries,
                 rows,
                 scroll,
+                size,
+                row,
             } => {
+                let (size, row_h) = (*size, *row);
                 ui::panel(canvas, HISTORY_PANEL);
                 let title = self.strings.get("history.title").to_string();
                 ui::heading(canvas, &mut self.font, HISTORY_PANEL, &title);
-                let hover = history_layout(rows, *scroll)
-                    .find(|(_, top, _)| (*top..top + HISTORY_ROW).contains(&mouse.1))
+                let hover = history_layout(rows, *scroll, row_h)
+                    .find(|(_, top, _)| (*top..top + row_h).contains(&mouse.1))
                     .map(|(_, _, row)| row.entry)
                     .filter(|&e| entries[e].voice.is_some() && HISTORY_PANEL.contains(mouse));
-                for (_, top, row) in history_layout(rows, *scroll) {
+                for (_, top, row) in history_layout(rows, *scroll, row_h) {
                     let color = if row.speaker {
                         theme::ACCENT
                     } else if hover == Some(row.entry) {
@@ -1024,17 +1312,10 @@ impl Shell {
                     let x = HISTORY_PANEL.x + if row.speaker { 40 } else { 60 };
                     if row.first && entries[row.entry].voice.is_some() {
                         // A mark before lines with a voice.
-                        canvas.fill_rect(HISTORY_PANEL.x + 40, top + 11, 8, 8, theme::ACCENT);
+                        let mark = top + (size * 0.55) as i32 - 4;
+                        canvas.fill_rect(HISTORY_PANEL.x + 40, mark, 8, 8, theme::ACCENT);
                     }
-                    ui::label(
-                        canvas,
-                        &mut self.font,
-                        x,
-                        top,
-                        &row.text,
-                        HISTORY_SIZE,
-                        color,
-                    );
+                    ui::label(canvas, &mut self.font, x, top, &row.text, size, color);
                 }
                 let hint = self.strings.get("history.hint").to_string();
                 ui::label(
@@ -1078,11 +1359,13 @@ impl Shell {
                     let mut settings = self.settings.clone();
                     if let Some(&mut level) = setting.level(&mut settings) {
                         let bar = level_rect(i);
-                        ui::level_bar(canvas, bar, level, MAX_LEVEL);
-                        let value = if setting == Setting::TextSpeed && level == MAX_LEVEL {
-                            self.strings.get("common.instant").to_string()
-                        } else {
-                            level.to_string()
+                        ui::level_bar(canvas, bar, level, setting.max());
+                        let value = match setting {
+                            Setting::TextSpeed if level == MAX_LEVEL => {
+                                self.strings.get("common.instant").to_string()
+                            }
+                            Setting::TextSize => format!("{}", self.settings.text_px()),
+                            _ => level.to_string(),
                         };
                         ui::label(
                             canvas,
@@ -1103,17 +1386,27 @@ impl Shell {
                                     StartScreen::Original => "settings.start.original",
                                 })
                                 .to_string(),
-                            Setting::Fullscreen | Setting::UnlockAll => {
-                                let on = if setting == Setting::Fullscreen {
-                                    self.settings.fullscreen
-                                } else {
-                                    self.settings.unlock_all
-                                };
-                                self.strings
+                            Setting::Font => match self.settings.font {
+                                FontChoice::Original => {
+                                    self.strings.get("settings.font.original").to_string()
+                                }
+                                font => font.name().to_string(),
+                            },
+                            Setting::Outline => self
+                                .strings
+                                .get(match self.settings.outline {
+                                    Outline::Off => "settings.outline.off",
+                                    Outline::Shadow => "settings.outline.shadow",
+                                    Outline::Outline => "settings.outline.outline",
+                                })
+                                .to_string(),
+                            other => match other.toggle(&mut settings) {
+                                Some(&mut on) => self
+                                    .strings
                                     .get(if on { "common.on" } else { "common.off" })
-                                    .to_string()
-                            }
-                            _ => String::new(),
+                                    .to_string(),
+                                None => String::new(),
+                            },
                         };
                         let f = &mut self.font;
                         ui::label(
@@ -1144,7 +1437,48 @@ impl Shell {
                         );
                     }
                 }
+                if *tab == TEXT_TAB {
+                    self.draw_text_preview(canvas);
+                }
             }
+        }
+    }
+
+    /// A sample message as the game text settings draw it.
+    fn draw_text_preview(&mut self, canvas: &mut Canvas) {
+        let rows = Setting::tab(TEXT_TAB).len();
+        let top = setting_row(rows - 1).bottom() + 10;
+        let area = Rect::new(220, top, 840, (660 - top - 12).max(20) as u32);
+        let alpha = self.settings.window_alpha();
+        let back = if self.settings.high_contrast {
+            Color::BLACK
+        } else {
+            Color::rgba(20, 30, 90, alpha.max(40))
+        };
+        canvas.fill_rect(area.x, area.y, area.w, area.h, back);
+        // Game text is drawn at 800 × 600 and shown scaled by 1.2.
+        let size = self.settings.text_px() * 1.2;
+        let shadow = (self.settings.outline != Outline::Off).then_some(Color::BLACK);
+        let style = TextStyle {
+            shadow,
+            outline: self.settings.outline == Outline::Outline,
+            ..TextStyle::plain(size, Color::WHITE)
+        };
+        let sample = self.strings.get("settings.preview").to_string();
+        let line = self.settings.line_height(size);
+        let mut y = area.y as f32 + 6.0;
+        for text in self
+            .font
+            .wrap(&sample, size, area.w as f32 - 32.0)
+            .iter()
+            .take(2)
+        {
+            if y + line > area.bottom() as f32 + 4.0 {
+                break;
+            }
+            self.font
+                .draw_line(canvas, area.x as f32 + 16.0, y, text, style);
+            y += line;
         }
     }
 }
@@ -1206,8 +1540,11 @@ fn tab_rect(t: usize) -> Rect {
     Rect::new(220 + t as i32 * 210, 140, 200, 46)
 }
 
+/// The settings tab with the text preview.
+const TEXT_TAB: usize = 2;
+
 fn setting_row(i: usize) -> Rect {
-    Rect::new(220, 210 + i as i32 * 70, 840, 58)
+    Rect::new(220, 204 + i as i32 * 62, 840, 54)
 }
 
 fn setting_control(i: usize) -> Rect {
@@ -1225,6 +1562,7 @@ fn level_rect(i: usize) -> Rect {
 fn history_layout(
     rows: &[HistoryRow],
     scroll: usize,
+    height: i32,
 ) -> impl Iterator<Item = (usize, i32, &HistoryRow)> {
     let mut y = HISTORY_TOP;
     rows.iter()
@@ -1232,18 +1570,18 @@ fn history_layout(
         .skip(scroll)
         .map(move |(i, row)| {
             let top = y + if i == scroll { 0 } else { row.gap };
-            y = top + HISTORY_ROW;
+            y = top + height;
             (i, top, row)
         })
-        .take_while(|(_, top, _)| top + HISTORY_ROW <= HISTORY_BOTTOM)
+        .take_while(move |(_, top, _)| top + height <= HISTORY_BOTTOM)
 }
 
 /// The scroll position that shows the last rows.
-fn history_last_page(rows: &[HistoryRow]) -> usize {
+fn history_last_page(rows: &[HistoryRow], row_height: i32) -> usize {
     let mut height = 0;
     let mut first = rows.len();
     for i in (0..rows.len()).rev() {
-        let h = HISTORY_ROW
+        let h = row_height
             + if first == rows.len() {
                 0
             } else {
@@ -1335,6 +1673,8 @@ mod tests {
         dismissed: bool,
         /// Every `freeze` call.
         frozen: Vec<bool>,
+        /// Last `set_auto`.
+        auto: Option<bool>,
         /// What the next frame returns.
         next: Option<SessionEvent>,
     }
@@ -1392,6 +1732,10 @@ mod tests {
 
         fn freeze(&mut self, frozen: bool) {
             self.0.borrow_mut().frozen.push(frozen);
+        }
+
+        fn set_auto(&mut self, auto: bool) {
+            self.0.borrow_mut().auto = Some(auto);
         }
 
         fn history(&self) -> Vec<HistoryEntry> {
@@ -1474,6 +1818,7 @@ mod tests {
         let options = ShellOptions {
             data_dir: Some(dir.join("data")),
             saves: Some(dir.join("saves")),
+            fixed_font: false,
         };
         let game = Counter::default();
         let log = game.0.clone();
@@ -1500,6 +1845,16 @@ mod tests {
         assert_eq!(canvas.pixel(640, 360), Color::rgb(200, 0, 0));
         assert_eq!(canvas.pixel(10, 360), Color::BLACK);
         assert_eq!(log.borrow().clicks, [(400, 300)]);
+
+        // A toggles auto mode, shown over the game.
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[InputEvent::KeyDown(Key::Char('a'))],
+        );
+        assert!(shell.auto());
+        assert_eq!(log.borrow().auto, Some(true));
 
         // Escape pauses: the game stops.
         step(
@@ -1582,7 +1937,7 @@ mod tests {
             &mut canvas,
             &[InputEvent::KeyDown(Key::Escape)],
         );
-        let menu = pause_rects()[5];
+        let menu = pause_rects()[6];
         step(
             &mut shell,
             &mixer,
@@ -1594,6 +1949,9 @@ mod tests {
             shell.screens.last(),
             Some(Screen::MainMenu { .. })
         ));
+        // Leaving the game ends auto mode.
+        assert!(!shell.auto());
+        assert_eq!(log.borrow().auto, Some(false));
         let quit = menu_rects()[5];
         let flow = step(
             &mut shell,
@@ -1602,6 +1960,157 @@ mod tests {
             &[click(quit.x + 5, quit.y + 5)],
         );
         assert_eq!(flow, Flow::Quit);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Finds a game in folders named `game`; opens a [`Counter`].
+    struct FakeLauncher(Counter);
+
+    impl Launcher for FakeLauncher {
+        fn detect(&self, dir: &Path) -> Result<Option<GameInfo>, String> {
+            Ok(
+                (dir.file_name() == Some("game".as_ref())).then(|| GameInfo {
+                    engine: "test",
+                    title: "Counter".into(),
+                    root: dir.to_path_buf(),
+                    details: Vec::new(),
+                }),
+            )
+        }
+
+        fn open(&self, _game: &GameInfo) -> Result<Box<dyn Session>, String> {
+            Ok(Box::new(self.0.clone()))
+        }
+    }
+
+    #[test]
+    fn library_adds_opens_and_changes_games() {
+        let Some(font) = font() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("vnr-launcher-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let games = dir.join("games");
+        std::fs::create_dir_all(games.join("game")).unwrap();
+        std::fs::create_dir_all(games.join("other")).unwrap();
+        // The picker opens where it was last.
+        Library::open(Some(dir.join("data"))).set_last_folder(&games);
+
+        let game = Counter::default();
+        let log = game.0.clone();
+        let options = ShellOptions {
+            data_dir: Some(dir.join("data")),
+            saves: None,
+            fixed_font: false,
+        };
+        let mut shell = Shell::launcher(Box::new(FakeLauncher(game)), font, options);
+        let mixer = Mixer::new(1);
+        let mut canvas = Canvas::new(ui::WIDTH, ui::HEIGHT);
+        step(&mut shell, &mixer, &mut canvas, &[]);
+        assert!(matches!(shell.screens.as_slice(), [Screen::Library(_)]));
+        assert_eq!(shell.session().title(), "VNRevival");
+
+        // Add a game: the picker lists `..`, `game`, `other`.
+        let add = library::add_rect();
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(add.x + 5, add.y + 5)],
+        );
+        let Some(Screen::Picker(_)) = shell.screens.last() else {
+            panic!("no picker");
+        };
+        let use_button = library::use_rect();
+        // Nothing to use in the parent folder.
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(use_button.x + 5, use_button.y + 5)],
+        );
+        assert!(matches!(shell.screens.last(), Some(Screen::Picker(_))));
+        let row = library::picker_row(1);
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(row.x + 5, row.y + 5)],
+        );
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(use_button.x + 5, use_button.y + 5)],
+        );
+        assert!(matches!(shell.screens.as_slice(), [Screen::Library(_)]));
+        assert_eq!(shell.library.games().len(), 1);
+
+        // Open it: the universal menu of that game.
+        let card = library::card_rect(0);
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(card.x + 40, card.y + 60)],
+        );
+        assert!(matches!(
+            shell.screens.as_slice(),
+            [Screen::MainMenu { .. }]
+        ));
+        assert_eq!(shell.session().title(), "Counter");
+        assert!(shell.library.games()[0].last_played.is_some());
+        let start = menu_rects()[0];
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(start.x + 5, start.y + 5)],
+        );
+        assert!(shell.in_game());
+        assert_eq!(log.borrow().started, [Start::NewGame]);
+
+        // Back to the main menu, then "Change game": the library again.
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[InputEvent::KeyDown(Key::Escape)],
+        );
+        let menu = pause_rects()[6];
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(menu.x + 5, menu.y + 5)],
+        );
+        let change = menu_rects()[4];
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(change.x + 5, change.y + 5)],
+        );
+        assert!(matches!(shell.screens.as_slice(), [Screen::Library(_)]));
+        assert_eq!(shell.session().title(), "VNRevival");
+
+        // With the game's own title at start, opening shows the game
+        // itself, with nothing over it.
+        let mut settings = shell.settings().clone();
+        settings.start = StartScreen::Original;
+        shell.set_settings(settings);
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(card.x + 40, card.y + 60)],
+        );
+        assert!(
+            shell.in_game(),
+            "{} screens over the game",
+            shell.screens.len()
+        );
+        assert_eq!(log.borrow().started.last(), Some(&Start::OriginalTitle));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

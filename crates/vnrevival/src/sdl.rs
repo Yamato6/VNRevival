@@ -57,7 +57,10 @@ fn key(code: Keycode) -> Option<Key> {
         Keycode::F10 => Key::F(10),
         Keycode::F11 => Key::F(11),
         Keycode::F12 => Key::F(12),
-        _ => return None,
+        _ => {
+            let c = u8::try_from(code.into_i32()).ok()?;
+            return c.is_ascii_lowercase().then_some(Key::Char(char::from(c)));
+        }
     })
 }
 
