@@ -62,6 +62,7 @@ struct Voice {
     clip: Arc<Clip>,
     frame: usize,
     volume: u16,
+    paused: bool,
 }
 
 #[derive(Debug)]
@@ -99,6 +100,7 @@ impl Mixer {
                 clip,
                 frame: 0,
                 volume,
+                paused: false,
             });
         }
     }
@@ -129,6 +131,21 @@ impl Mixer {
         }
     }
 
+    /// Holds a channel where it is (`true`) or lets it go on.
+    pub fn set_paused(&self, channel: usize, paused: bool) {
+        if let Some(Some(voice)) = self.lock().channels.get_mut(channel) {
+            voice.paused = paused;
+        }
+    }
+
+    /// Stereo frames of its clip a channel has played, while it plays.
+    pub fn position(&self, channel: usize) -> Option<usize> {
+        self.lock()
+            .channels
+            .get(channel)
+            .and_then(|slot| slot.as_ref().map(|voice| voice.frame))
+    }
+
     /// Volume applied to everything (0..=[`FULL_VOLUME`]).
     pub fn set_master_volume(&self, volume: u16) {
         self.lock().master = volume;
@@ -141,6 +158,9 @@ impl Mixer {
         let mut acc = vec![0i32; out.len()];
         for slot in &mut state.channels {
             let Some(voice) = slot else { continue };
+            if voice.paused {
+                continue;
+            }
             let samples = &voice.clip.samples;
             let gain = i32::from(voice.volume) * master;
             let mut i = 0;
@@ -195,6 +215,25 @@ mod tests {
         assert!(mixer.is_playing(0));
         mixer.stop(0);
         assert!(!mixer.is_playing(0));
+    }
+
+    #[test]
+    fn paused_channels_hold_their_place() {
+        let mixer = Mixer::new(1);
+        mixer.play(0, Arc::new(Clip::mono(&[1, 2, 3, 4])), FULL_VOLUME);
+        let mut out = [0i16; 2];
+        mixer.mix(&mut out);
+        assert_eq!(mixer.position(0), Some(1));
+        mixer.set_paused(0, true);
+        mixer.mix(&mut out);
+        assert_eq!(out, [0, 0]);
+        assert_eq!(mixer.position(0), Some(1));
+        mixer.set_paused(0, false);
+        mixer.mix(&mut out);
+        assert_eq!(out, [2, 2]);
+        assert_eq!(mixer.position(0), Some(2));
+        mixer.stop(0);
+        assert_eq!(mixer.position(0), None);
     }
 
     #[test]

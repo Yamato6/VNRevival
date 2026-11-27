@@ -89,8 +89,9 @@ on the engine side: the title menu, messages with speaker colours and
 voices, choices, backgrounds, character sprites, colour fills,
 transitions with the original timings (cross-fade and the "morning light"
 wipe), waits, music, sound effects and voices, and the in-game PC:
-the chat client, the mailer, letters, text labels, the taskbar clock and
-pop-up animations. "New game" in VNRevival's menu runs the game's
+the chat client, the mailer, letters, text labels, the taskbar clock,
+pop-up animations and the opening movie (Indeo 5, decoded by VNTools-rs;
+a click ends it). "New game" in VNRevival's menu runs the game's
 start-up unseen and answers its title; with the original title screen,
 its load button opens VNRevival's load screen.
 Still missing: several effects; engine functions that are not implemented are skipped and
@@ -124,8 +125,7 @@ on in the settings. For Pure Mail, the pictures and scenes use the same
 records as the original (`system.sav`, imported from the original's
 `SAVE/SAVEFL99.SAV` the first time), so progress made with the original
 counts; music heard is VNRevival's own record (`music.json`). The first
-scene is the opening movie, which ends at once until video is
-supported.
+scene is the opening movie.
 
 ### Settings
 
@@ -186,6 +186,7 @@ create `.cargo/config.toml` (ignored by git) with:
 ```toml
 [patch."https://github.com/Yamato6/VNTools-rs"]
 overflow-adv2 = { path = "../VNTools-rs/overflow-adv2" }
+indeo = { path = "../VNTools-rs/indeo" }
 ```
 
 ## Roadmap
@@ -195,12 +196,13 @@ overflow-adv2 = { path = "../VNTools-rs/overflow-adv2" }
    audio mixing, headless runs with screenshots.
 3. Pure Mail playable. Done: script interpreter (variables, expressions,
    `pmail.obj` functions, the engine's `sys` calls), choices, the in-game
-   PC. To do: the remaining engine functions and effects.
+   PC, the opening movie. To do: the remaining engine functions and
+   effects.
 4. Universal interface. Done: main menu, pause menu, save slots, history,
    settings, interface languages, CG gallery, music room, scene replay.
    To do: a game library with a folder picker, text input for names,
    a user manual.
-5. Video (Indeo 5 movies), mods and translations.
+5. Mods and translations.
 6. More engines.
 
 ## License

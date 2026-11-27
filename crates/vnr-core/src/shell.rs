@@ -255,6 +255,8 @@ pub struct Shell {
     thumbs: HashMap<extras::ThumbKey, Option<Arc<Sprite>>>,
     /// A scene of the extras is being replayed.
     replaying: bool,
+    /// The game is in progress but a screen covers it.
+    frozen: bool,
 }
 
 /// History layout.
@@ -284,6 +286,7 @@ impl Shell {
             extras,
             thumbs: HashMap::new(),
             replaying: false,
+            frozen: false,
             game: Canvas::new(w, h),
             game_frame: 0,
             started: false,
@@ -1299,6 +1302,11 @@ impl App for Shell {
         } else if self.in_game && !self.game_shortcuts(frame.input) {
             self.run_game(frame.input, frame.mixer);
         }
+        let frozen = self.in_game && !self.screens.is_empty();
+        if frozen != self.frozen {
+            self.frozen = frozen;
+            self.session.freeze(frozen);
+        }
         self.draw(frame.canvas);
         if self.quit {
             self.session.silence();
@@ -1325,6 +1333,8 @@ mod tests {
         started: Vec<Start>,
         loaded: Option<SaveData>,
         dismissed: bool,
+        /// Every `freeze` call.
+        frozen: Vec<bool>,
         /// What the next frame returns.
         next: Option<SessionEvent>,
     }
@@ -1378,6 +1388,10 @@ mod tests {
 
         fn dismissed(&mut self) {
             self.0.borrow_mut().dismissed = true;
+        }
+
+        fn freeze(&mut self, frozen: bool) {
+            self.0.borrow_mut().frozen.push(frozen);
         }
 
         fn history(&self) -> Vec<HistoryEntry> {
@@ -1495,6 +1509,7 @@ mod tests {
             &[InputEvent::KeyDown(Key::Escape)],
         );
         assert!(!shell.in_game());
+        assert_eq!(log.borrow().frozen, [true]);
         let frames = log.borrow().frames;
         step(&mut shell, &mixer, &mut canvas, &[]);
         assert_eq!(log.borrow().frames, frames);
@@ -1533,6 +1548,7 @@ mod tests {
         );
         assert!(shell.in_game());
         assert_eq!(log.borrow().loaded.as_ref().unwrap().chapter, "One");
+        assert_eq!(log.borrow().frozen, [true, false]);
 
         // The game's own load request: closing it tells the game.
         log.borrow_mut().next = Some(SessionEvent::OpenLoad);

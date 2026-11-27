@@ -320,6 +320,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "indeo"
+version = "0.1.0"
+source = "git+https://github.com/Yamato6/VNTools-rs#8fda478d0fd27b6ee2b71bd10b53d98abc3cb70b"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -404,7 +412,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "overflow-adv2"
 version = "0.1.0"
-source = "git+https://github.com/Yamato6/VNTools-rs#e7190b30855e0545936eae631930001b42529659"
+source = "git+https://github.com/Yamato6/VNTools-rs#8fda478d0fd27b6ee2b71bd10b53d98abc3cb70b"
 dependencies = [
  "encoding_rs",
  "thiserror",
@@ -618,6 +626,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "encoding_rs",
+ "indeo",
  "overflow-adv2",
  "serde",
  "serde_json",

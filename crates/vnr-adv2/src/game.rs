@@ -36,6 +36,7 @@
 //! | `17` | new game: take the hero's names from the game options (the original asks in a dialog) | `0x421d20`; see [`crate::names`] |
 //! | `18`, `d8` | clear the history and the chat log | `0x421d00`, `0x4220f0` |
 //! | `d7` | unlock a scene of the replay list | `0x421f50`; see [`crate::system`] |
+//! | `35` | play a movie (`MOVIE/<name>L_I5.AVI`); a click ends it | strings of `PMAIL.EXE`, `OF_ADV2.INI`; see [`crate::movie`] |
 //!
 //! Everything else is ignored for now and reported once on stderr.
 
@@ -54,6 +55,7 @@ use vnr_core::{
 use crate::assets::Assets;
 use crate::backlog::{Entry, History};
 use crate::ini::Settings;
+use crate::movie::Movie;
 use crate::names::Names;
 use crate::options::GameOptions;
 use crate::pc::{self, Label, Line, Mail, PcView, Popup};
@@ -70,7 +72,8 @@ pub const HEIGHT: u32 = 600;
 pub const CHANNEL_MUSIC: usize = 0;
 pub const CHANNEL_SOUND: usize = 1;
 pub const CHANNEL_VOICE: usize = 2;
-pub const CHANNELS: usize = 3;
+pub const CHANNEL_MOVIE: usize = 3;
+pub const CHANNELS: usize = 4;
 
 /// Fade speed when a picture change is shown without `sys 40`
 /// (240 ms).
@@ -149,6 +152,8 @@ enum Mode {
     Paused,
     /// Waiting until a mixer channel is silent (a click skips).
     Channel(usize),
+    /// A movie is playing (a click ends it).
+    Movie,
     /// The script stopped.
     Ended(String),
 }
@@ -264,6 +269,10 @@ pub struct Engine {
     replay: bool,
     /// Fraction of a character of text still to reveal.
     reveal: f32,
+    /// Install folder.
+    root: PathBuf,
+    /// The movie playing.
+    movie: Option<Movie>,
 }
 
 impl Engine {
@@ -276,7 +285,7 @@ impl Engine {
     /// Mixer volume of a channel from the settings.
     fn channel_volume(&self, channel: usize) -> u16 {
         PlayerSettings::volume(match channel {
-            CHANNEL_MUSIC => self.player.music,
+            CHANNEL_MUSIC | CHANNEL_MOVIE => self.player.music,
             CHANNEL_SOUND => self.player.sound,
             _ => self.player.voice,
         })
@@ -285,7 +294,7 @@ impl Engine {
     /// Applies changed settings to what is playing.
     fn apply_volumes(&self) {
         if let Some(mixer) = &self.mixer {
-            for channel in [CHANNEL_MUSIC, CHANNEL_SOUND, CHANNEL_VOICE] {
+            for channel in [CHANNEL_MUSIC, CHANNEL_SOUND, CHANNEL_VOICE, CHANNEL_MOVIE] {
                 mixer.set_volume(channel, self.channel_volume(channel));
             }
         }
@@ -341,7 +350,7 @@ impl Engine {
     }
 
     fn stop_all(&self) {
-        for channel in [CHANNEL_MUSIC, CHANNEL_SOUND, CHANNEL_VOICE] {
+        for channel in [CHANNEL_MUSIC, CHANNEL_SOUND, CHANNEL_VOICE, CHANNEL_MOVIE] {
             self.stop(channel);
         }
     }
@@ -371,6 +380,38 @@ impl Engine {
         self.history = History::default();
         self.names = self.options.names.clone();
         self.reveal = 0.0;
+        self.movie = None;
+    }
+
+    /// `sys 35`: plays a movie and waits for it.
+    fn play_movie(&mut self, name: &str) -> Control {
+        if self.skipping {
+            return Control::Continue;
+        }
+        let small = self.settings.int("MovieType") == Some(1);
+        match Movie::open(&self.root, name, small) {
+            Ok(mut movie) => {
+                self.stop(CHANNEL_MUSIC);
+                let volume = self.channel_volume(CHANNEL_MOVIE);
+                movie.start(self.mixer.as_ref(), CHANNEL_MOVIE, volume, self.frame);
+                self.movie = Some(movie);
+                self.mode = Mode::Movie;
+                Control::Yield
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                Control::Continue
+            }
+        }
+    }
+
+    /// Ends the movie (finished or skipped).
+    fn end_movie(&mut self) {
+        self.movie = None;
+        self.stop(CHANNEL_MOVIE);
+        if self.mode == Mode::Movie {
+            self.mode = Mode::Running;
+        }
     }
 
     /// Waits until `channel` is silent.
@@ -713,6 +754,7 @@ impl Host for Engine {
                     }
                 });
             }
+            0x35 => return self.play_movie(&text(0)),
             0x50 => {
                 let clock = text(0).trim().to_string();
                 self.stage_pc(|pc| pc.clock = Some(clock));
@@ -959,6 +1001,8 @@ impl Game {
             heard: HeardTracks::default(),
             replay: false,
             reveal: 0.0,
+            root: root.to_path_buf(),
+            movie: None,
         };
         Ok(Self {
             title,
@@ -1277,6 +1321,15 @@ impl Game {
                     e.mode = Mode::Running;
                 }
             }
+            Mode::Movie => {
+                let playing = match e.movie.as_mut() {
+                    Some(movie) => movie.advance(e.mixer.as_ref(), CHANNEL_MOVIE, frame.number),
+                    None => false,
+                };
+                if !playing || advance || skip {
+                    e.end_movie();
+                }
+            }
             Mode::Running | Mode::Paused | Mode::Ended(_) => {}
         }
         if let Some((variable, value)) = answer {
@@ -1497,6 +1550,10 @@ impl Session for Game {
             frame.canvas.clear(Color::BLACK);
             return event;
         }
+        if let Some(movie) = &self.engine.movie {
+            movie.draw(frame.canvas);
+            return event;
+        }
 
         match &self.engine.transition {
             Some(t) if !t.done(frame.number) => {
@@ -1575,6 +1632,12 @@ impl Session for Game {
 
     fn silence(&mut self) {
         self.engine.stop_all();
+    }
+
+    fn freeze(&mut self, frozen: bool) {
+        if let Some(mixer) = &self.engine.mixer {
+            mixer.set_paused(CHANNEL_MOVIE, frozen);
+        }
     }
 
     fn gallery(&mut self) -> Vec<GalleryEntry> {
@@ -2039,5 +2102,59 @@ mod tests {
             }
         }
         panic!("the scene never ended");
+    }
+
+    #[test]
+    fn plays_the_opening_movie() {
+        let Some(mut game) = open(None) else {
+            eprintln!("ADV2_GAME_DIR not set or no font, skipping");
+            return;
+        };
+        // The first scene of the replay list is the opening movie.
+        game.start(Start::Scene("etc00".into())).unwrap();
+        let mixer = Mixer::new(CHANNELS);
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        // One frame of sound per frame, as the audio device would take.
+        let mut sound = vec![0i16; 2 * 44_100 / vnr_core::FPS as usize];
+        let mut number = 0;
+        let mut run = |game: &mut Game, canvas: &mut Canvas, frames: u64, input: &[InputEvent]| {
+            let mut event = SessionEvent::Continue;
+            for _ in 0..frames {
+                event = step(game, &mixer, canvas, number, input);
+                mixer.mix(&mut sound);
+                number += 1;
+                if event != SessionEvent::Continue {
+                    break;
+                }
+            }
+            event
+        };
+        run(&mut game, &mut canvas, 1, &[]);
+        assert_eq!(game.engine.mode, Mode::Movie);
+        assert!(mixer.is_playing(CHANNEL_MOVIE));
+
+        // 40 seconds in: a picture over the whole screen.
+        run(&mut game, &mut canvas, 40 * 60, &[]);
+        assert_eq!(game.engine.mode, Mode::Movie);
+        shoot(&canvas, "movie-40s");
+        let lit = (0..HEIGHT)
+            .step_by(20)
+            .flat_map(|y| (0..WIDTH).step_by(20).map(move |x| (x, y)))
+            .filter(|&(x, y)| canvas.pixel(x, y).r > 40)
+            .count();
+        assert!(lit > 100, "{lit} lit samples");
+
+        // Behind a menu the sound holds, and so does the picture.
+        let position = mixer.position(CHANNEL_MOVIE);
+        game.freeze(true);
+        mixer.mix(&mut [0i16; 1470]);
+        assert_eq!(mixer.position(CHANNEL_MOVIE), position);
+        game.freeze(false);
+
+        // A click ends it, and the replay goes back to the extras.
+        let event = run(&mut game, &mut canvas, 600, &[click_at(400, 300)]);
+        assert_eq!(event, SessionEvent::ToMenu);
+        assert!(game.engine.movie.is_none());
+        assert!(!mixer.is_playing(CHANNEL_MOVIE));
     }
 }

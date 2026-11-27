@@ -137,6 +137,11 @@ pub trait Session {
     /// Stops all sound (when leaving the game for the menu).
     fn silence(&mut self) {}
 
+    /// The game is hidden behind a screen of the interface (`true`) and
+    /// does not run, or runs again. Sound that follows the game's clock,
+    /// like a movie's, should hold meanwhile.
+    fn freeze(&mut self, _frozen: bool) {}
+
     /// The gallery.
     fn gallery(&mut self) -> Vec<GalleryEntry> {
         Vec::new()

@@ -1,6 +1,7 @@
 //! VNRevival backend for OverflowADV2, the engine of Pure Mail (2001).
 //!
-//! Data formats are read through the `overflow-adv2` crate from VNTools-rs.
+//! Data formats are read through the `overflow-adv2` crate from VNTools-rs,
+//! movies through its `indeo` crate.
 //!
 //! Launching a game boots it on the script machine ([`vm`]), with the
 //! engine functions implemented in [`game`].
@@ -9,6 +10,7 @@ pub mod assets;
 pub mod backlog;
 pub mod game;
 pub mod ini;
+pub mod movie;
 pub mod names;
 pub mod options;
 pub mod pc;
