@@ -7,6 +7,8 @@ and plays them on Windows, Linux and macOS.
 
 VNRevival ships **no game data**.
 
+Players: see the **[user manual](docs/MANUAL.md)**.
+
 ## Supported engines
 
 | Engine | Games | Status |
@@ -142,7 +144,8 @@ scene is the opening movie.
 
 ### Settings
 
-The settings screen (F4) has four tabs:
+The settings screen (F4) has four tabs, and a fifth, **Game**, for a
+game with options of its own:
 
 * **System**: interface language (English, Spanish or Japanese), the
   interface font, what to show at start (VNRevival's menu or the game's title), full screen,
@@ -156,6 +159,7 @@ The settings screen (F4) has four tabs:
   the voice to end, and whether skipping also skips text not read yet.
   VNRevival remembers what you have read in every playthrough
   (`read.json` next to the saves).
+* **Game**: the game's own options (for Pure Mail, the hero's names).
 
 They apply to every game and are kept in `settings.json` in the user
 data folder
@@ -166,8 +170,14 @@ Each interface language can be changed or completed with a
 `lang/<code>.json` file in that folder (`en`, `es`, `ja`) holding
 `{"key": "text"}` pairs; the keys are listed in `crates/vnr-core/src/lang.rs`.
 
-Options that belong to one game are kept with its saves: for Pure Mail,
-the hero's names in `options.json`.
+Options that belong to one game are kept with its saves. A new game of
+Pure Mail asks for the hero's names (surname and given name with their
+readings, and the chat handle), as the original's dialog did; they are
+typed with the keyboard or the system's input method (IME), which is on
+only while a field is being typed into. They can be changed later in
+Settings → Game, apply from the next new game and are kept in
+`options.json`. Voices say the hero's name only while the readings and
+the handle are the original ones.
 
 ### Fonts
 
@@ -236,7 +246,8 @@ indeo = { path = "../VNTools-rs/indeo" }
    menu, pause menu, save slots, history, settings, interface languages,
    CG gallery, music room, scene replay; accessibility (fonts, text size,
    line spacing, outline, high contrast, auto mode, skipping only read
-   text). To do: text input for names, a user manual.
+   text); the game's own options with text input (IME); the
+   [user manual](docs/MANUAL.md).
 5. Mods and translations.
 6. More engines.
 

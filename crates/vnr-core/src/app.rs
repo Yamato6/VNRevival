@@ -41,7 +41,7 @@ pub enum Key {
 }
 
 /// One input event, in canvas coordinates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputEvent {
     MouseMove {
         x: i32,
@@ -61,6 +61,13 @@ pub enum InputEvent {
     Wheel(i32),
     KeyDown(Key),
     KeyUp(Key),
+    /// Text typed while text input is on (see
+    /// [`Shell::text_input`](crate::shell::Shell::text_input)): a key, or
+    /// what an input method (IME) committed.
+    Text(String),
+    /// What an input method is composing, not committed yet; empty when
+    /// the composition ends.
+    Composition(String),
 }
 
 /// Everything a game gets for one frame.
@@ -114,7 +121,7 @@ pub fn run_headless(
         let input: Vec<InputEvent> = script
             .iter()
             .filter(|(at, _)| *at == number)
-            .map(|(_, e)| *e)
+            .map(|(_, e)| e.clone())
             .collect();
         let mut frame = Frame {
             number,
@@ -167,19 +174,19 @@ mod tests {
 
     #[test]
     fn headless_runs_are_deterministic() {
-        let click = InputEvent::MouseDown {
+        let click = || InputEvent::MouseDown {
             button: MouseButton::Left,
             x: 0,
             y: 0,
         };
-        let script = [(1, click), (5, click)];
+        let script = [(1, click()), (5, click())];
         let mixer = Mixer::new(1);
         let mut app = Clicker { clicks: 0 };
         let canvas = run_headless(&mut app, &mixer, 100, &script);
         assert_eq!(canvas.pixel(0, 0), Color::rgb(20, 0, 0));
         // A third click makes it quit.
         let mut app = Clicker { clicks: 0 };
-        let script = [(1, click), (2, click), (3, click)];
+        let script = [(1, click()), (2, click()), (3, click())];
         let canvas = run_headless(&mut app, &mixer, 100, &script);
         assert_eq!(canvas.pixel(0, 0), Color::rgb(30, 0, 0));
     }

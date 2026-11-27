@@ -11,6 +11,7 @@ use std::sync::Arc;
 use crate::app::Frame;
 use crate::audio::Clip;
 use crate::gfx::Sprite;
+use crate::lang::Language;
 use crate::settings::Settings;
 
 /// How to begin a game.
@@ -36,6 +37,10 @@ pub enum SessionEvent {
     OpenLoad,
     /// The game's own title asked for the extras.
     OpenExtras,
+    /// A new game asks for the game's options (see [`Session::options`]),
+    /// like the original's name entry. Call [`Session::dismissed`] when
+    /// the player is done.
+    AskOptions,
     Quit,
 }
 
@@ -49,6 +54,23 @@ pub struct SaveData {
     pub chapter: String,
     /// The text on screen, for the slot list.
     pub excerpt: String,
+}
+
+/// One of the game's own options: a text the player types, like the
+/// hero's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameOption {
+    /// What [`Session::set_option`] takes.
+    pub id: String,
+    /// Name shown to the player, in the interface language.
+    pub label: String,
+    pub value: String,
+    /// The game's own default.
+    pub default: String,
+    /// Most characters it takes.
+    pub max_chars: usize,
+    /// A note shown while it is being edited.
+    pub hint: Option<String>,
 }
 
 /// One entry of the message history.
@@ -141,6 +163,18 @@ pub trait Session {
     /// for example).
     fn cover(&mut self) -> Option<Arc<Sprite>> {
         None
+    }
+
+    /// The game's own options, with labels in `language`; empty for a
+    /// game without any.
+    fn options(&mut self, _language: Language) -> Vec<GameOption> {
+        Vec::new()
+    }
+
+    /// Changes one of the game's options (and keeps it); an error says
+    /// why the value is not accepted.
+    fn set_option(&mut self, _id: &str, _value: &str) -> Result<(), String> {
+        Err("this game has no options".into())
     }
 
     /// Auto mode: messages move on by themselves once read (see

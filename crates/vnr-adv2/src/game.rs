@@ -33,7 +33,7 @@
 //! | `a0`–`c3`, `33`, `34`, `50` | the in-game PC | see [`crate::pc`] |
 //! | `11` | clear the game variables (ids below `0x4000`) | `0x401040` |
 //! | `13`, `14` | restore points of the original's save (nothing to do) | `0x425730`, `0x425de0` |
-//! | `17` | new game: take the hero's names from the game options (the original asks in a dialog) | `0x421d20`; see [`crate::names`] |
+//! | `17` | new game: ask for the hero's names (the interface shows the game options, as the original's dialog) | `0x421d20`; see [`crate::names`] |
 //! | `18`, `d8` | clear the history and the chat log | `0x421d00`, `0x4220f0` |
 //! | `d7` | unlock a scene of the replay list | `0x421f50`; see [`crate::system`] |
 //! | `35` | play a movie (`MOVIE/<name>L_I5.AVI`); a click ends it | strings of `PMAIL.EXE`, `OF_ADV2.INI`; see [`crate::movie`] |
@@ -47,8 +47,8 @@ use std::sync::Arc;
 use vnr_core::settings::StartScreen;
 use vnr_core::{
     BackendError, Canvas, Clip, Color, Font, FontChoice, FontFamily, Frame, GalleryEntry,
-    HistoryEntry, InputEvent, Key, Mixer, MouseButton, Outline, ReplayScene, SaveData, Session,
-    SessionEvent, Settings as PlayerSettings, Sprite, Start, TextStyle, Track,
+    GameOption, HistoryEntry, InputEvent, Key, Language, Mixer, MouseButton, Outline, ReplayScene,
+    SaveData, Session, SessionEvent, Settings as PlayerSettings, Sprite, Start, TextStyle, Track,
 };
 
 use crate::assets::Assets;
@@ -292,6 +292,8 @@ pub struct Engine {
     message_done: Option<u64>,
     /// Characters to read at the current click wait (for auto mode).
     click_chars: usize,
+    /// `sys 17` is waiting for the names.
+    asking_names: bool,
 }
 
 impl Engine {
@@ -887,7 +889,16 @@ impl Host for Engine {
                     self.play(CHANNEL_VOICE, clip);
                 }
             }
-            0x17 => self.names = self.options.names.clone(),
+            0x17 => {
+                self.names = self.options.names.clone();
+                if self.replay {
+                    return Control::Continue;
+                }
+                self.event = Some(SessionEvent::AskOptions);
+                self.asking_names = true;
+                self.mode = Mode::Paused;
+                return Control::Yield;
+            }
             0x11 => vm.clear_variables(GAME_VARIABLES_END),
             0xD7 => {
                 if self.system.unlock_scene(&text(0))
@@ -1062,6 +1073,7 @@ impl Game {
             auto: false,
             message_done: None,
             click_chars: 0,
+            asking_names: false,
         };
         Ok(Self {
             title,
@@ -1687,9 +1699,28 @@ impl Session for Game {
     }
 
     fn dismissed(&mut self) {
-        if self.engine.mode == Mode::Paused {
-            self.engine.mode = Mode::Running;
+        let e = &mut self.engine;
+        if e.asking_names {
+            e.asking_names = false;
+            e.names = e.options.names.clone();
         }
+        if e.mode == Mode::Paused {
+            e.mode = Mode::Running;
+        }
+    }
+
+    fn options(&mut self, language: Language) -> Vec<GameOption> {
+        self.engine.options.fields(language)
+    }
+
+    fn set_option(&mut self, id: &str, value: &str) -> Result<(), String> {
+        self.engine.options.set(id, value)?;
+        if let Some(dir) = &self.data_dir
+            && let Err(e) = self.engine.options.store(dir)
+        {
+            eprintln!("could not save the game options: {e}");
+        }
+        Ok(())
     }
 
     fn history(&self) -> Vec<HistoryEntry> {
@@ -1868,7 +1899,8 @@ mod tests {
         }
     }
 
-    /// One frame.
+    /// One frame. The names a new game asks for are taken as they are,
+    /// as the interface does when the player closes its screen.
     fn step(
         game: &mut Game,
         mixer: &Mixer,
@@ -1882,7 +1914,11 @@ mod tests {
             canvas,
             mixer,
         };
-        game.update(&mut frame)
+        let event = game.update(&mut frame);
+        if event == SessionEvent::AskOptions {
+            game.dismissed();
+        }
+        event
     }
 
     fn shoot(canvas: &Canvas, name: &str) {
@@ -2176,14 +2212,18 @@ mod tests {
         game.start(Start::NewGame).unwrap();
         let mixer = Mixer::new(CHANNELS);
         let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        let mut asked = 0;
         for number in 0..4000 {
             let input: &[InputEvent] = if number % 20 == 19 && !game.engine.fast_start {
                 &[click_at(0, 0)]
             } else {
                 &[]
             };
-            let event = step(&mut game, &mixer, &mut canvas, number, input);
-            assert_eq!(event, SessionEvent::Continue);
+            // Asking for the names (`sys 17`) is the only event.
+            match step(&mut game, &mixer, &mut canvas, number, input) {
+                SessionEvent::AskOptions => asked += 1,
+                event => assert_eq!(event, SessionEvent::Continue),
+            }
             assert!(!matches!(
                 game.engine.mode,
                 Mode::Title { .. } | Mode::Ended(_)
@@ -2195,6 +2235,7 @@ mod tests {
                 && matches!(game.engine.mode, Mode::Message { .. })
             {
                 shoot(&canvas, "new-game");
+                assert_eq!(asked, 1, "the names are asked once");
                 return;
             }
         }

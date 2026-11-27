@@ -232,7 +232,7 @@ fn run_headless(
             };
             (n..frames)
                 .step_by(n as usize)
-                .map(|f| (f, click))
+                .map(|f| (f, click.clone()))
                 .collect()
         }
         _ => Vec::new(),
@@ -348,6 +348,23 @@ mod tests {
         assert!(!shell.in_game());
         vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, click(600, 260))]);
         assert!(shell.in_game());
+        // A new game asks for the hero's name; an input method composes
+        // a word in the first field.
+        let mut frames = 0;
+        while shell.text_input().is_none() {
+            vnr_core::run_headless(&mut shell, &mixer, 1, &[]);
+            frames += 1;
+            assert!(frames < 2000, "the names were not asked");
+        }
+        let composing = InputEvent::Composition("けい".into());
+        let canvas = vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, composing)]);
+        shoot(&canvas, "names");
+        let done = [
+            (0, InputEvent::Composition(String::new())),
+            (1, key(Key::Escape)),
+        ];
+        vnr_core::run_headless(&mut shell, &mixer, 2, &done);
+        assert!(shell.text_input().is_none() && shell.in_game());
         let advance: Vec<_> = (10..1500)
             .step_by(20)
             .map(|f| (f, click(640, 360)))
@@ -371,14 +388,18 @@ mod tests {
 
         // The text and reading settings.
         vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, key(Key::F(4)))]);
-        for (name, x) in [("settings-text", 700), ("settings-reading", 900)] {
+        for (name, x) in [
+            ("settings-text", 640),
+            ("settings-reading", 810),
+            ("settings-game", 980),
+        ] {
             let canvas = vnr_core::run_headless(&mut shell, &mixer, 2, &[(0, click(x, 160))]);
             shoot(&canvas, name);
         }
         vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, key(Key::Escape))]);
         // Auto mode, shown over the game.
         let a = key(Key::Char('a'));
-        let canvas = vnr_core::run_headless(&mut shell, &mixer, 2, &[(0, a)]);
+        let canvas = vnr_core::run_headless(&mut shell, &mixer, 2, &[(0, a.clone())]);
         assert!(shell.auto());
         shoot(&canvas, "auto");
         vnr_core::run_headless(&mut shell, &mixer, 1, &[(0, a)]);

@@ -144,6 +144,21 @@ const TEXTS: &[(&str, &str, &str, &str)] = &[
         "ウィンドウの濃さ",
     ),
     ("settings.tab.reading", "Reading", "Lectura", "読み進め"),
+    ("settings.tab.game", "Game", "Juego", "ゲーム"),
+    ("options.ask", "New game", "Nueva partida", "はじめから"),
+    (
+        "options.ask.note",
+        "Enter the hero's name. You can change it later in Settings → Game.",
+        "Escribe el nombre del protagonista. Puedes cambiarlo en Ajustes → Juego.",
+        "主人公の名前を入力してください。あとで「設定 → ゲーム」で変更できます。",
+    ),
+    ("options.start", "Start", "Empezar", "開始"),
+    (
+        "options.defaults",
+        "Restore defaults",
+        "Valores originales",
+        "初期値に戻す",
+    ),
     (
         "settings.font",
         "Interface font",

@@ -4,6 +4,10 @@
 //!
 //! Game logic runs at a fixed [`FPS`]; drawing happens once per display
 //! refresh with vsync. Alt+Enter toggles full screen.
+//!
+//! Text input (with the system's input method, for Japanese) is on only
+//! while the interface asks for it ([`Shell::text_input`]), so that the
+//! input method does not take the keys of the game.
 
 use std::time::{Duration, Instant};
 
@@ -12,10 +16,11 @@ use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Mod};
 use sdl2::mouse::MouseButton as SdlButton;
 use sdl2::pixels::PixelFormatEnum;
-use sdl2::video::FullscreenType;
+use sdl2::video::{FullscreenType, Window};
 use vnr_core::app::Frame;
 use vnr_core::audio::SAMPLE_RATE;
 use vnr_core::shell::Shell;
+use vnr_core::ui::Rect;
 use vnr_core::{App, Canvas, FPS, Flow, InputEvent, Key, Mixer, MouseButton};
 
 /// Most logic frames run back to back when the window falls behind (for
@@ -76,6 +81,11 @@ fn button(b: SdlButton) -> Option<MouseButton> {
 /// Translates an SDL event. Mouse coordinates are already in canvas
 /// pixels because the renderer has a logical size.
 fn translate(event: &Event) -> Option<InputEvent> {
+    match event {
+        Event::TextInput { text, .. } => return Some(InputEvent::Text(text.clone())),
+        Event::TextEditing { text, .. } => return Some(InputEvent::Composition(text.clone())),
+        _ => {}
+    }
     Some(match *event {
         Event::KeyDown {
             keycode: Some(code),
@@ -106,6 +116,24 @@ fn translate(event: &Event) -> Option<InputEvent> {
     })
 }
 
+/// `r`, in canvas pixels, in window coordinates (the canvas is scaled to
+/// fit the window, centred).
+fn to_window(window: &Window, (width, height): (u32, u32), r: Rect) -> sdl2::rect::Rect {
+    let (ww, wh) = window.size();
+    let scale = f64::min(
+        f64::from(ww) / f64::from(width),
+        f64::from(wh) / f64::from(height),
+    );
+    let ox = (f64::from(ww) - f64::from(width) * scale) / 2.0;
+    let oy = (f64::from(wh) - f64::from(height) * scale) / 2.0;
+    sdl2::rect::Rect::new(
+        (ox + f64::from(r.x) * scale) as i32,
+        (oy + f64::from(r.y) * scale) as i32,
+        (f64::from(r.w) * scale).max(1.0) as u32,
+        (f64::from(r.h) * scale).max(1.0) as u32,
+    )
+}
+
 /// Opens a window and runs `app` until it quits or the window is closed.
 pub fn run(app: &mut Shell, mixer: &Mixer, scale: u32) -> Result<(), String> {
     let sdl = sdl2::init()?;
@@ -113,6 +141,12 @@ pub fn run(app: &mut Shell, mixer: &Mixer, scale: u32) -> Result<(), String> {
     let (width, height) = app.resolution();
     // Smooth scaling; must be set before the texture is created.
     sdl2::hint::set("SDL_RENDER_SCALE_QUALITY", "linear");
+    // The input method draws its own composition and candidate windows.
+    sdl2::hint::set("SDL_IME_SHOW_UI", "1");
+    let text_input = video.text_input();
+    // SDL starts with text input on.
+    text_input.stop();
+    let mut typing: Option<Rect> = None;
 
     let window = video
         .window(&app.title(), width * scale, height * scale)
@@ -203,6 +237,20 @@ pub fn run(app: &mut Shell, mixer: &Mixer, scale: u32) -> Result<(), String> {
         }
         if ran == MAX_CATCH_UP {
             next = Instant::now() + step;
+        }
+
+        let wanted = app.text_input();
+        if wanted != typing {
+            match wanted {
+                Some(r) => {
+                    text_input.set_rect(to_window(screen.window(), (width, height), r));
+                    if typing.is_none() {
+                        text_input.start();
+                    }
+                }
+                None => text_input.stop(),
+            }
+            typing = wanted;
         }
 
         texture

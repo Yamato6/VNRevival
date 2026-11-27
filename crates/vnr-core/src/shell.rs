@@ -11,9 +11,14 @@
 //! In a game, Escape or the right mouse button open the pause menu; F2
 //! saves, F3 loads, F4 opens the settings and the wheel (up) or Page Up
 //! open the history.
+//!
+//! The game's own options (the hero's name) are text fields: while one
+//! is being typed into, [`Shell::text_input`] tells the frontend to send
+//! text and input method events.
 
 mod extras;
 mod library;
+mod options;
 
 pub use extras::MUSIC_CHANNEL;
 
@@ -79,11 +84,14 @@ const PAUSE_ITEMS: [&str; 8] = [
     "pause.menu",
     "pause.quit",
 ];
-const TABS: [&str; 4] = [
+/// Settings tabs; the last one, the game's options, only for a game
+/// that has some.
+const TABS: [&str; 5] = [
     "settings.tab.system",
     "settings.tab.sound",
     "settings.tab.screen",
     "settings.tab.reading",
+    "settings.tab.game",
 ];
 
 /// One setting row.
@@ -301,6 +309,7 @@ enum Screen {
     Viewer(extras::Viewer),
     Library(library::LibraryScreen),
     Picker(library::Picker),
+    Options(options::OptionsScreen),
 }
 
 /// What a screen asks for after its input.
@@ -394,6 +403,8 @@ pub struct Shell {
     library: Library,
     /// Install folder of the open game, when it came from the launcher.
     game_root: Option<PathBuf>,
+    /// Whether the game has options of its own.
+    has_options: bool,
 }
 
 /// History layout.
@@ -430,9 +441,11 @@ impl Shell {
         let extras = !(session.gallery().is_empty()
             && session.tracks().is_empty()
             && session.scenes().is_empty());
+        let has_options = !session.options(settings.language).is_empty();
         Self {
             session,
             extras,
+            has_options,
             thumbs: HashMap::new(),
             replaying: false,
             frozen: false,
@@ -523,6 +536,7 @@ impl Shell {
         self.extras = !(session.gallery().is_empty()
             && session.tracks().is_empty()
             && session.scenes().is_empty());
+        self.has_options = !session.options(self.settings.language).is_empty();
         let (w, h) = session.resolution();
         self.session = session;
         self.game = Canvas::new(w, h);
@@ -603,6 +617,49 @@ impl Shell {
             mixer.set_master_volume(Settings::volume(self.settings.master));
         }
         self.session.apply(&self.settings);
+    }
+
+    /// Where text is being typed (a field of the game's options), in
+    /// interface pixels; `None` when no text is expected. While it is
+    /// `Some`, the frontend should send [`InputEvent::Text`] and
+    /// [`InputEvent::Composition`] and place the input method's window
+    /// near it.
+    pub fn text_input(&self) -> Option<Rect> {
+        match self.screens.last() {
+            Some(Screen::Options(o)) => o.editing().map(options::field_rect),
+            _ => None,
+        }
+    }
+
+    /// Number of settings tabs.
+    fn tab_count(&self) -> usize {
+        if self.has_options {
+            TABS.len()
+        } else {
+            options::GAME_TAB
+        }
+    }
+
+    /// The settings tabs, with `active` selected.
+    fn draw_tabs(&mut self, canvas: &mut Canvas, active: usize) {
+        for (t, key) in TABS.iter().enumerate().take(self.tab_count()) {
+            let state = if t == active {
+                State::Active
+            } else {
+                State::of(tab_rect(t).contains(self.mouse), true)
+            };
+            let text = self.strings.get(key).to_string();
+            ui::button(canvas, &mut self.font, tab_rect(t), &text, state);
+        }
+    }
+
+    /// The settings screen on tab `tab`.
+    fn settings_tab(&mut self, tab: usize) -> Screen {
+        if tab == options::GAME_TAB {
+            self.options_screen(false)
+        } else {
+            Screen::Settings { tab, focus: None }
+        }
     }
 
     /// Whether the game is running with no menu over it.
@@ -758,7 +815,7 @@ impl Shell {
     fn run_game(&mut self, input: &[InputEvent], mixer: &Mixer) {
         let translated: Vec<InputEvent> = input
             .iter()
-            .map(|event| match *event {
+            .map(|event| match event.clone() {
                 InputEvent::MouseMove { x, y } => {
                     let (x, y) = self.to_game((x, y));
                     InputEvent::MouseMove { x, y }
@@ -799,6 +856,11 @@ impl Shell {
                 self.screens.push(screen);
             }
             SessionEvent::OpenExtras => self.session.dismissed(),
+            SessionEvent::AskOptions if self.has_options && !self.replaying => {
+                let screen = self.options_screen(true);
+                self.screens.push(screen);
+            }
+            SessionEvent::AskOptions => self.session.dismissed(),
             SessionEvent::Quit => self.quit = true,
         }
     }
@@ -848,6 +910,7 @@ impl Shell {
                         requested: true, ..
                     }) => self.session.dismissed(),
                     Some(Screen::Extras(ex)) if ex.requested => self.session.dismissed(),
+                    Some(Screen::Options(o)) if o.asked => self.session.dismissed(),
                     _ => {}
                 }
                 if self.screens.is_empty() && !self.in_game {
@@ -929,6 +992,7 @@ impl Shell {
             Screen::Viewer(v) => return self.viewer_input(v, input),
             Screen::Library(lib) => return self.library_input(lib, input),
             Screen::Picker(p) => return self.picker_input(p, input),
+            Screen::Options(o) => return self.options_input(o, input),
             Screen::MainMenu { focus } => {
                 let rects = menu_rects();
                 for event in input {
@@ -1053,6 +1117,7 @@ impl Shell {
             }
             Screen::Settings { tab, focus } => {
                 let mut settings = self.settings.clone();
+                let tabs = self.tab_count();
                 for event in input {
                     if back(event) {
                         actions.push(Action::Close);
@@ -1072,8 +1137,11 @@ impl Shell {
                             x,
                             y,
                         } => {
-                            if let Some(t) = (0..TABS.len()).find(|&t| tab_rect(t).contains((x, y)))
-                            {
+                            if let Some(t) = (0..tabs).find(|&t| tab_rect(t).contains((x, y))) {
+                                if t == options::GAME_TAB {
+                                    actions.push(Action::Replace(self.settings_tab(t)));
+                                    break;
+                                }
                                 *tab = t;
                                 *focus = None;
                             } else if let Some(i) =
@@ -1099,13 +1167,17 @@ impl Shell {
                         InputEvent::KeyDown(Key::Down) => {
                             *focus = Some(focus.map_or(0, |i| (i + 1) % rows.len()));
                         }
-                        InputEvent::KeyDown(Key::PageUp) => {
-                            *tab = (*tab + TABS.len() - 1) % TABS.len();
+                        InputEvent::KeyDown(key @ (Key::PageUp | Key::PageDown)) => {
+                            *tab = if key == Key::PageUp {
+                                (*tab + tabs - 1) % tabs
+                            } else {
+                                (*tab + 1) % tabs
+                            };
                             *focus = None;
-                        }
-                        InputEvent::KeyDown(Key::PageDown) => {
-                            *tab = (*tab + 1) % TABS.len();
-                            *focus = None;
+                            if *tab == options::GAME_TAB {
+                                actions.push(Action::Replace(self.settings_tab(*tab)));
+                                break;
+                            }
                         }
                         InputEvent::KeyDown(key @ (Key::Left | Key::Right | Key::Enter)) => {
                             if let Some(&setting) = focus.and_then(|i| rows.get(i)) {
@@ -1188,6 +1260,7 @@ impl Shell {
             Screen::Viewer(v) => self.draw_viewer(canvas, v),
             Screen::Library(lib) => self.draw_library(canvas, lib),
             Screen::Picker(p) => self.draw_picker(canvas, p),
+            Screen::Options(o) => self.draw_options(canvas, o),
             Screen::MainMenu { focus } => {
                 let title = self.session.title();
                 let f = &mut self.font;
@@ -1358,15 +1431,7 @@ impl Shell {
                 ui::panel(canvas, panel);
                 let title = self.strings.get("settings.title").to_string();
                 ui::heading(canvas, &mut self.font, panel, &title);
-                for (t, key) in TABS.iter().enumerate() {
-                    let state = if t == *tab {
-                        State::Active
-                    } else {
-                        State::of(tab_rect(t).contains(mouse), true)
-                    };
-                    let text = self.strings.get(key).to_string();
-                    ui::button(canvas, &mut self.font, tab_rect(t), &text, state);
-                }
+                self.draw_tabs(canvas, *tab);
                 for (i, &setting) in Setting::tab(*tab).iter().enumerate() {
                     let row = setting_row(i);
                     ui::item(canvas, row, State::of(*focus == Some(i), true));
@@ -1577,7 +1642,7 @@ fn slot_rect(i: usize) -> Rect {
 }
 
 fn tab_rect(t: usize) -> Rect {
-    Rect::new(220 + t as i32 * 210, 140, 200, 46)
+    Rect::new(220 + t as i32 * 170, 140, 160, 46)
 }
 
 /// The settings tab with the text preview.
@@ -1805,6 +1870,146 @@ mod tests {
                 unlocked: true,
             }]
         }
+    }
+
+    /// A game with one option, a name, that it asks for at once.
+    #[derive(Default, Clone)]
+    struct Named {
+        name: Rc<RefCell<String>>,
+        asked: Rc<RefCell<bool>>,
+        dismissed: Rc<RefCell<bool>>,
+    }
+
+    impl Session for Named {
+        fn title(&self) -> String {
+            "Named".into()
+        }
+
+        fn resolution(&self) -> (u32, u32) {
+            (800, 600)
+        }
+
+        fn start(&mut self, _start: Start) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn update(&mut self, _frame: &mut Frame<'_>) -> SessionEvent {
+            if self.asked.replace(true) {
+                SessionEvent::Continue
+            } else {
+                SessionEvent::AskOptions
+            }
+        }
+
+        fn can_save(&self) -> bool {
+            false
+        }
+
+        fn save(&self) -> Result<SaveData, String> {
+            Err("no".into())
+        }
+
+        fn load(&mut self, _data: &SaveData) -> Result<(), String> {
+            Err("no".into())
+        }
+
+        fn dismissed(&mut self) {
+            *self.dismissed.borrow_mut() = true;
+        }
+
+        fn options(&mut self, _language: Language) -> Vec<crate::session::GameOption> {
+            vec![crate::session::GameOption {
+                id: "name".into(),
+                label: "Name".into(),
+                value: self.name.borrow().clone(),
+                default: "k".into(),
+                max_chars: 4,
+                hint: None,
+            }]
+        }
+
+        fn set_option(&mut self, id: &str, value: &str) -> Result<(), String> {
+            assert_eq!(id, "name");
+            if value.is_empty() {
+                return Err("empty".into());
+            }
+            *self.name.borrow_mut() = value.into();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn game_options_take_typed_text() {
+        let Some(font) = font() else {
+            eprintln!("no font, skipping");
+            return;
+        };
+        let game = Named::default();
+        *game.name.borrow_mut() = "k".into();
+        let mut shell = Shell::new(Box::new(game.clone()), font, ShellOptions::default());
+        let mixer = Mixer::new(2);
+        let mut canvas = Canvas::new(ui::WIDTH, ui::HEIGHT);
+        let key = InputEvent::KeyDown;
+        let text = |s: &str| InputEvent::Text(s.into());
+        let compose = |s: &str| InputEvent::Composition(s.into());
+        shell.begin(Start::NewGame);
+
+        // The new game asks: typing goes into the first field.
+        step(&mut shell, &mixer, &mut canvas, &[]);
+        assert_eq!(shell.text_input(), Some(options::field_rect(0)));
+        step(&mut shell, &mixer, &mut canvas, &[text("ab")]);
+        // Keys an input method is composing with are its own.
+        step(&mut shell, &mixer, &mut canvas, &[compose("x")]);
+        step(&mut shell, &mixer, &mut canvas, &[key(Key::Backspace)]);
+        step(&mut shell, &mixer, &mut canvas, &[key(Key::Escape)]);
+        assert!(shell.text_input().is_some(), "escape while composing");
+        // Its commit, and the key that ended it in the same frame.
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[compose(""), text("c"), key(Key::Enter)],
+        );
+        step(&mut shell, &mixer, &mut canvas, &[text("de")]);
+        let Some(Screen::Options(o)) = shell.screens.last() else {
+            panic!("no options screen");
+        };
+        assert_eq!(o.values[0], "kabc", "at most 4 characters");
+        step(&mut shell, &mixer, &mut canvas, &[key(Key::Backspace)]);
+        // Enter keeps the field; on the last one it leaves the fields,
+        // and then starts.
+        step(&mut shell, &mixer, &mut canvas, &[key(Key::Enter)]);
+        assert_eq!(*game.name.borrow(), "kab");
+        assert!(shell.text_input().is_none() && !*game.dismissed.borrow());
+        step(&mut shell, &mixer, &mut canvas, &[key(Key::Enter)]);
+        assert!(*game.dismissed.borrow() && shell.in_game());
+
+        // The settings' last tab has them too; an empty name is refused.
+        step(&mut shell, &mixer, &mut canvas, &[key(Key::F(4))]);
+        step(&mut shell, &mixer, &mut canvas, &[key(Key::PageUp)]);
+        assert!(matches!(shell.screens.last(), Some(Screen::Options(o)) if !o.asked));
+        let field = options::field_rect(0);
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[click(field.x + 5, field.y + 5)],
+        );
+        let erase = vec![key(Key::Backspace); 3];
+        step(&mut shell, &mixer, &mut canvas, &erase);
+        step(&mut shell, &mixer, &mut canvas, &[key(Key::Escape)]);
+        let Some(Screen::Options(o)) = shell.screens.last() else {
+            panic!("an empty name closed the screen");
+        };
+        assert!(o.error.is_some());
+        step(
+            &mut shell,
+            &mixer,
+            &mut canvas,
+            &[text("z"), key(Key::Escape)],
+        );
+        assert!(shell.in_game());
+        assert_eq!(*game.name.borrow(), "z");
     }
 
     fn font() -> Option<Font> {
