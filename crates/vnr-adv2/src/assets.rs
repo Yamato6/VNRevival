@@ -63,6 +63,19 @@ impl Assets {
         Ok(Script::parse(&data).map_err(|e| format!("{file}: {e}"))?)
     }
 
+    /// A grey picture (rules, masks) as `(width, height, values)`, rows
+    /// top-down. Not cached.
+    pub fn gray(&mut self, file: &str) -> Option<(u32, u32, Vec<u8>)> {
+        let entry = self.graphic.find(file)?.clone();
+        let data = self.graphic.read(&entry).ok()?;
+        let image = graphic::decode(&entry.name, &data)
+            .ok()?
+            .into_iter()
+            .next()?
+            .image;
+        (image.format == PixelFormat::Gray8).then_some((image.width, image.height, image.pixels))
+    }
+
     /// The first picture of `stem` with one of `extensions`, or `None`
     /// if there is no such file.
     pub fn picture(&mut self, stem: &str, extensions: &[&str]) -> Option<Arc<Sprite>> {

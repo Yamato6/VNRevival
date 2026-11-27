@@ -78,7 +78,8 @@ functions of `pmail.obj`, branches and script changes all work (an
 automated walk covers the whole game without a machine error). Implemented
 on the engine side: the title menu, messages with speaker colours and
 voices, choices, backgrounds, character sprites, colour fills,
-cross-fades, waits, music, sound effects and voices, and the in-game PC:
+transitions with the original timings (cross-fade and the "morning light"
+wipe), waits, music, sound effects and voices, and the in-game PC:
 the chat client, the mailer, letters, text labels, the taskbar clock and
 pop-up animations; saving and loading, the message history and settings.
 Still missing: several effects; engine functions that are not implemented are skipped and

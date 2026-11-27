@@ -19,7 +19,7 @@
 //! | `21`, `22` | wait (milliseconds) | data |
 //! | `30` | background, clears characters | handler `0x4247b0` |
 //! | `31` | character in a slot | data |
-//! | `40` | show the staged scene (cross-fade unless the first argument is 0) | data, provisional |
+//! | `40` | show the staged scene through a transition and wait for it | handler `0x423d40`; see [`crate::transition`] |
 //! | `45` | fill the scene with a colour | data, provisional |
 //! | `60` | sound effect | data |
 //! | `70`, `73` | music track `MM%03d`, stop music | data, provisional |
@@ -50,6 +50,7 @@ use crate::ini::Settings;
 use crate::pc::{self, Label, Line, Mail, PcView, Popup};
 use crate::prefs::{self, Preferences};
 use crate::save::{self, EngineState, SaveFile, SavedMode, SceneState, SlotSummary, Slots};
+use crate::transition::{self, Effect, MorningPictures, Transition};
 use crate::vm::{Control, Host, Machine, Status, Value};
 
 /// Screen size of the engine.
@@ -62,7 +63,9 @@ pub const CHANNEL_SOUND: usize = 1;
 pub const CHANNEL_VOICE: usize = 2;
 pub const CHANNELS: usize = 3;
 
-const FADE_FRAMES: u64 = 15;
+/// Fade speed when a picture change is shown without `sys 40`
+/// (240 ms).
+const IMPLICIT_FADE_STEP: u32 = 16;
 /// Script with the shared functions, loaded first.
 const LIBRARY: &str = "pmail";
 const STEP_BUDGET: usize = 200_000;
@@ -134,6 +137,8 @@ enum Mode {
     Wait(u64),
     /// Waiting for a click.
     Click,
+    /// Waiting for a transition to end.
+    Transition,
     /// Stopped while a menu is open.
     Paused,
     /// Waiting until a mixer channel is silent (a click skips).
@@ -203,8 +208,13 @@ pub struct Engine {
     /// Scene on screen.
     shown: Scene,
     shown_canvas: Canvas,
-    /// Cross-fade in progress: the old picture and the start frame.
-    fade: Option<(Canvas, u64)>,
+    /// Transition in progress.
+    transition: Option<Transition>,
+    /// `GrpWipeWait` (ms per transition step).
+    wipe_wait: u32,
+    /// Pictures of the morning wipe, once loaded (`None` inside if
+    /// missing).
+    morning: Option<Option<Arc<MorningPictures>>>,
     window_visible: bool,
     speaker: (usize, String),
     chapter: String,
@@ -285,6 +295,21 @@ impl Engine {
         }
     }
 
+    /// `ASABASE` and `ASAFLASH`, loaded on first use.
+    fn morning_pictures(&mut self) -> Option<Arc<MorningPictures>> {
+        if self.morning.is_none() {
+            let base = self.assets.gray("ASABASE.ALPF");
+            let flash = self.assets.gray("ASAFLASH.ALPA");
+            self.morning = Some(match (base, flash) {
+                (Some((200, 150, base)), Some((250, 200, flash))) => {
+                    Some(Arc::new(MorningPictures { base, flash }))
+                }
+                _ => None,
+            });
+        }
+        self.morning.clone().flatten()
+    }
+
     fn stop(&self, channel: usize) {
         if let Some(mixer) = &self.mixer {
             mixer.stop(channel);
@@ -310,11 +335,19 @@ impl Engine {
         self.popups.clear();
     }
 
-    /// Shows the staged scene, with a cross-fade if `fade`.
-    fn present(&mut self, fade: bool) {
-        if fade && !self.skipping {
-            self.fade = Some((self.shown_canvas.clone(), self.frame));
-        }
+    /// Shows the staged scene through `effect` at progress step `step`.
+    fn present(&mut self, effect: Effect, step: u32) {
+        self.transition = match effect {
+            Effect::Cut => None,
+            _ if self.skipping => None,
+            effect => Some(Transition::new(
+                effect,
+                self.shown_canvas.clone(),
+                self.frame,
+                step,
+                self.wipe_wait,
+            )),
+        };
         self.shown = self.staged.clone();
         self.shown
             .draw(&mut self.shown_canvas, self.fonts.get(FontFamily::Gothic));
@@ -324,9 +357,9 @@ impl Engine {
     /// picture changes fade, PC text changes appear at once.
     fn present_if_changed(&mut self) {
         if !self.shown.same_picture(&self.staged) {
-            self.present(true);
+            self.present(Effect::Fade, IMPLICIT_FADE_STEP);
         } else if self.shown.pc_revision != self.staged.pc_revision {
-            self.present(false);
+            self.present(Effect::Cut, 1);
         }
     }
 
@@ -511,8 +544,23 @@ impl Host for Engine {
                 }
             }
             0x40 => {
-                let effect = num(vm, self, 0);
-                self.present(effect != 0);
+                let kind = num(vm, self, 0);
+                let mode = num(vm, self, 1);
+                let step = transition::step(num(vm, self, 2));
+                let effect = match kind {
+                    0 => Effect::Cut,
+                    3 => match self.morning_pictures() {
+                        Some(pictures) => Effect::morning(mode, pictures),
+                        None => Effect::Fade,
+                    },
+                    _ => Effect::Fade,
+                };
+                self.present(effect, step);
+                // The engine returns only when the effect is over.
+                if self.transition.is_some() {
+                    self.mode = Mode::Transition;
+                    return Control::Yield;
+                }
             }
             0x45 => {
                 let c = |v: i32| v.clamp(0, 255) as u8;
@@ -677,7 +725,7 @@ impl Host for Engine {
                     background_name: Some("TITL00a".into()),
                     ..Scene::default()
                 };
-                self.present(true);
+                self.present(Effect::Fade, IMPLICIT_FADE_STEP);
                 self.window_visible = false;
                 self.chapter.clear();
                 self.mode = Mode::Title {
@@ -772,6 +820,9 @@ impl Game {
         script_names.insert(first.id, entry.to_string());
         vm.start(first);
         let settings = Settings::load(vnr_core::find_ci(root, "OF_ADV2.INI").as_deref());
+        let wipe_wait = settings
+            .int("GrpWipeWait")
+            .map_or(transition::DEFAULT_WAIT_MS, |v| v.clamp(1, 1000) as u32);
         let engine = Engine {
             assets,
             settings,
@@ -782,7 +833,9 @@ impl Game {
             staged: Scene::default(),
             shown: Scene::default(),
             shown_canvas: Canvas::new(WIDTH, HEIGHT),
-            fade: None,
+            transition: None,
+            wipe_wait,
+            morning: None,
             window_visible: false,
             speaker: (0, String::new()),
             chapter: String::new(),
@@ -994,8 +1047,7 @@ impl Game {
         }
         scene.pc_revision = e.staged.pc_revision + 1;
         e.staged = scene;
-        e.present(false);
-        e.fade = None;
+        e.present(Effect::Cut, 1);
         e.popups.clear();
         e.stop(CHANNEL_VOICE);
         e.stop(CHANNEL_SOUND);
@@ -1341,6 +1393,14 @@ impl Game {
                     e.mode = Mode::Running;
                 }
             }
+            Mode::Transition => {
+                if skip {
+                    e.transition = None;
+                }
+                if e.transition.as_ref().is_none_or(|t| t.done(frame.number)) {
+                    e.mode = Mode::Running;
+                }
+            }
             Mode::Channel(channel) => {
                 let playing = e.mixer.as_ref().is_some_and(|m| m.is_playing(*channel));
                 if !playing || advance || skip {
@@ -1537,15 +1597,13 @@ impl App for Game {
             }
         }
 
-        frame.canvas.blend_from(&self.engine.shown_canvas, 255);
-        if let Some((old, start)) = &self.engine.fade {
-            let t = frame.number.saturating_sub(*start);
-            if t >= FADE_FRAMES {
-                self.engine.fade = None;
-            } else {
-                let mut faded = old.clone();
-                faded.blend_from(&self.engine.shown_canvas, (t * 255 / FADE_FRAMES) as u8);
-                frame.canvas.blend_from(&faded, 255);
+        match &self.engine.transition {
+            Some(t) if !t.done(frame.number) => {
+                t.draw(&self.engine.shown_canvas, frame.canvas, frame.number);
+            }
+            _ => {
+                self.engine.transition = None;
+                frame.canvas.blend_from(&self.engine.shown_canvas, 255);
             }
         }
         if self.engine.load_requested {
@@ -1793,6 +1851,75 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// The dream script reaches a morning wipe, which blocks the script
+    /// and ends on the new picture (needs `ADV2_GAME_DIR`; screenshots of
+    /// its middle go to `$VNR_SHOT_DIR`).
+    #[test]
+    fn plays_a_morning_wipe() {
+        let Some(root) = std::env::var_os("ADV2_GAME_DIR") else {
+            eprintln!("ADV2_GAME_DIR not set, skipping");
+            return;
+        };
+        let mut game = match Game::new(Path::new(&root), "Pure Mail".into(), Some("PM_DREAM"), None)
+        {
+            Ok(g) => g,
+            Err(e) if e.to_string().contains("no Japanese font") => return,
+            Err(e) => panic!("{e}"),
+        };
+        let mixer = Mixer::new(CHANNELS);
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        let click = [InputEvent::MouseDown {
+            button: MouseButton::Left,
+            x: 0,
+            y: 0,
+        }];
+        let shots = std::env::var_os("VNR_SHOT_DIR");
+        let mut seen = None;
+        for number in 0..30_000 {
+            let waiting = matches!(game.engine.mode, Mode::Message { .. } | Mode::Click);
+            let input: &[InputEvent] = if waiting && number % 10 == 9 {
+                &click
+            } else {
+                &[]
+            };
+            let mut frame = Frame {
+                number,
+                input,
+                canvas: &mut canvas,
+                mixer: &mixer,
+            };
+            game.update(&mut frame);
+            let morning = game
+                .engine
+                .transition
+                .as_ref()
+                .filter(|t| matches!(t.effect(), Effect::Morning { .. }));
+            if let Some(t) = morning {
+                assert_eq!(game.engine.mode, Mode::Transition);
+                let start = t.start_frame();
+                let length = t.length();
+                seen = Some((start, length));
+                let at = number - start;
+                if let Some(out) = &shots
+                    && [length / 4, length / 2, length * 3 / 4].contains(&at)
+                {
+                    canvas
+                        .save_png(&Path::new(out).join(format!("morning-{at}.png")))
+                        .unwrap();
+                }
+            } else if let Some((start, length)) = seen {
+                assert!(number >= start + length, "ended early at {number}");
+                // The picture is the new scene (text may be drawn on top
+                // at the edges).
+                for (x, y) in [(400, 150), (100, 300), (700, 350)] {
+                    assert_eq!(canvas.pixel(x, y), game.engine.shown_canvas.pixel(x, y));
+                }
+                return;
+            }
+        }
+        panic!("no morning wipe reached");
+    }
+
     /// Every `sys 33` pop-up decodes at its size (needs `ADV2_GAME_DIR`).
     #[test]
     fn popups_decode() {
@@ -1816,7 +1943,7 @@ mod tests {
     fn prologue_uses_the_pc() {
         let chatting = |e: &Engine| {
             e.mode == Mode::Click
-                && e.fade.is_none()
+                && e.transition.is_none()
                 && e.shown.pc.chat.as_ref().is_some_and(|c| c.len() >= 10)
         };
         let Some(game) = play_prologue_until("chat", 40_000, chatting) else {
@@ -1830,8 +1957,9 @@ mod tests {
                 .any(|l| l.text.contains("ＥＶＥ"))
         );
 
-        let reading =
-            |e: &Engine| e.mode == Mode::Click && e.shown.pc.mail.is_some() && e.fade.is_none();
+        let reading = |e: &Engine| {
+            e.mode == Mode::Click && e.shown.pc.mail.is_some() && e.transition.is_none()
+        };
         let game = play_prologue_until("mail", 80_000, reading).unwrap();
         let mail = game.engine.shown.pc.mail.as_ref().unwrap();
         assert_eq!(mail.lines[0].text, "ごめんなさい");
@@ -1869,9 +1997,9 @@ mod tests {
             y: 0,
         };
         let mut script: Vec<(u64, InputEvent)> =
-            (20..400).step_by(20).map(|f| (f, start)).collect();
-        script.extend((410..1400).step_by(20).map(|f| (f, click)));
-        let canvas = vnr_core::run_headless(&mut game, &mixer, 1400, &script);
+            (20..1200).step_by(20).map(|f| (f, start)).collect();
+        script.extend((1210..2600).step_by(20).map(|f| (f, click)));
+        let canvas = vnr_core::run_headless(&mut game, &mixer, 2600, &script);
         assert!(
             !matches!(game.engine.mode, Mode::Ended(_)),
             "{:?}",

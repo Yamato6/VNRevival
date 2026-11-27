@@ -270,6 +270,27 @@ impl Canvas {
         }
     }
 
+    /// Sets every pixel to a mix of `old` and `new` (both the same size
+    /// as this canvas): `weight(x, y)` is the share of `new`, 0 to 256.
+    pub fn mix(&mut self, old: &Canvas, new: &Canvas, weight: impl Fn(u32, u32) -> u16) {
+        assert_eq!((self.width, self.height), (old.width, old.height));
+        assert_eq!((self.width, self.height), (new.width, new.height));
+        let w = self.width as usize;
+        for (i, ((d, a), b)) in self
+            .pixels
+            .chunks_exact_mut(4)
+            .zip(old.pixels.chunks_exact(4))
+            .zip(new.pixels.chunks_exact(4))
+            .enumerate()
+        {
+            let k = u32::from(weight((i % w) as u32, (i / w) as u32).min(256));
+            for c in 0..3 {
+                d[c] = ((u32::from(a[c]) * (256 - k) + u32::from(b[c]) * k) >> 8) as u8;
+            }
+            d[3] = 255;
+        }
+    }
+
     /// Writes the canvas as an RGB PNG.
     pub fn save_png(&self, path: &Path) -> std::io::Result<()> {
         let file = BufWriter::new(File::create(path)?);

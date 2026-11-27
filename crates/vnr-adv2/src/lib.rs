@@ -12,6 +12,7 @@ pub mod ini;
 pub mod pc;
 pub mod prefs;
 pub mod save;
+pub mod transition;
 pub mod vm;
 
 use std::path::Path;
