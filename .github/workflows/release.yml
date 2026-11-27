@@ -1,0 +1,121 @@
+name: Release
+
+# Pushing a tag vX.Y.Z (matching the version in Cargo.toml) builds the
+# packages for Windows, Linux and macOS and creates a draft GitHub
+# release with them. Running the workflow by hand only builds the
+# packages, as artifacts of the run.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: package (${{ matrix.system }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: windows
+            os: windows-latest
+          # The oldest supported runner, so that the binary runs on
+          # distributions with an older glibc.
+          - system: linux
+            os: ubuntu-22.04
+          - system: macos
+            os: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag against Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match version $version in Cargo.toml" >&2
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.system == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      # SDL is built from source: it needs the headers of every video and
+      # audio system it should support (it loads the libraries at run time).
+      - name: Install SDL's build dependencies (Linux)
+        if: matrix.system == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libx11-dev libxext-dev libxrandr-dev \
+            libxcursor-dev libxi-dev libxss-dev libxinerama-dev libxfixes-dev \
+            libwayland-dev libxkbcommon-dev libegl-dev libgl-dev libdecor-0-dev \
+            libasound2-dev libpulse-dev libdbus-1-dev libudev-dev libibus-1.0-dev
+
+      - name: Build (Windows)
+        if: matrix.system == 'windows'
+        # The C runtime linked in, so that no Visual C++ redistributable
+        # is needed.
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static -C link-arg=/NODEFAULTLIB:msvcrt.lib
+        run: |
+          cargo build --release --locked -p vnrevival --target x86_64-pc-windows-msvc
+          bash packaging/package.sh windows target/x86_64-pc-windows-msvc/release/vnrevival.exe
+
+      - name: Build (Linux)
+        if: matrix.system == 'linux'
+        run: |
+          cargo build --release --locked -p vnrevival
+          bash packaging/package.sh linux target/release/vnrevival
+
+      - name: Build (macOS, Intel and Apple Silicon)
+        if: matrix.system == 'macos'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked -p vnrevival --target "$target"
+          done
+          lipo -create -output target/vnrevival-universal \
+            target/aarch64-apple-darwin/release/vnrevival \
+            target/x86_64-apple-darwin/release/vnrevival
+          bash packaging/package.sh macos target/vnrevival-universal
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vnrevival-${{ matrix.system }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: draft release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --title "VNRevival ${GITHUB_REF_NAME#v}" \
+            --generate-notes

@@ -246,7 +246,28 @@ fn font_dirs() -> Vec<PathBuf> {
             dirs.push(home.join(".fonts"));
         }
     }
+    dirs.extend(bundled_font_dirs());
     dirs
+}
+
+/// Where the release packages put the fonts they ship (Noto Sans JP),
+/// relative to the executable: `fonts` next to it (Windows and Linux
+/// archives), `../Resources/fonts` in a macOS app bundle and
+/// `../share/vnrevival/fonts` in an AppImage. Installed fonts come
+/// first.
+fn bundled_font_dirs() -> Vec<PathBuf> {
+    let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.canonicalize().ok())
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    else {
+        return Vec::new();
+    };
+    vec![
+        exe_dir.join("fonts"),
+        exe_dir.join("../Resources/fonts"),
+        exe_dir.join("../share/vnrevival/fonts"),
+    ]
 }
 
 /// How to draw a piece of text.

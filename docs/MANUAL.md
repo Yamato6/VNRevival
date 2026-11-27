@@ -21,9 +21,28 @@ Supported today: **Pure Mail** (Overflow, 2001), the DVD edition.
 
 ## Starting VNRevival
 
-Run `vnrevival run` to open the library, or `vnrevival run "<game folder>"`
-to go straight to one game (it is added to the library too). If you
-build VNRevival yourself, `cargo run --release -- run` does the same; the
+Download the package for your system from the project's releases and
+open it:
+
+* **Windows** (`…-windows-x64.zip`): extract the whole folder anywhere
+  and open `VNRevival.exe`. Keep the `fonts` folder next to it. If
+  Windows SmartScreen warns about an unknown program, click *More info*
+  and *Run anyway*.
+* **macOS** (`…-macos.dmg`, for Intel and Apple Silicon Macs, macOS 11
+  or newer): open the disk image and drag **VNRevival** to
+  *Applications*. The app is not notarised by Apple, so the first time
+  macOS refuses to open it: open it, then go to *System Settings →
+  Privacy & Security* and click *Open Anyway* (on older versions,
+  right-click the app and choose *Open*).
+* **Linux** (`…-linux-x64.AppImage`): make it executable
+  (`chmod +x VNRevival-*.AppImage`, or the file's properties) and open
+  it. The `.tar.gz` holds the same program as a plain folder: extract it
+  and run `vnrevival`, keeping the `fonts` folder next to it.
+
+VNRevival opens on the [library](#the-library). From a terminal,
+`vnrevival run "<game folder>"` goes straight to one game (it is added
+to the library too), and `vnrevival --help` lists the other options. If you build VNRevival
+yourself, `cargo run --release` does the same; the
 [README](../README.md) explains how to build it.
 
 The window can be resized and the picture keeps its shape. **Alt+Enter**
@@ -183,8 +202,10 @@ are installed: Noto Sans JP, Noto Serif JP, BIZ UDPGothic, BIZ
 UDPMincho, Yu Gothic and Meiryo. **Original** uses the fonts the game was
 made for (ＭＳ Ｐゴシック and ＭＳ Ｐ明朝) or the closest ones installed.
 
-Noto Sans JP and Noto Serif JP are free: install them from Google Fonts
-on Windows and macOS, or the `fonts-noto-cjk` package on Linux. If the
+Noto Sans JP comes with VNRevival (in the `fonts` folder of the
+download), so it is always there. The others can be installed for free:
+Noto Serif JP from Google Fonts, or the `fonts-noto-cjk` package on
+Linux; BIZ UDP fonts, Yu Gothic and Meiryo come with Windows. If the
 chosen font is missing, the next available one is used.
 
 ## Where VNRevival keeps your files
@@ -208,6 +229,10 @@ In that folder:
 The game's own folder is only read, never changed.
 
 ## Problems
+
+**VNRevival shows an error and closes.** The message says what went
+wrong (for example a game folder that cannot be read). To see the
+warnings VNRevival writes while it runs, start it from a terminal.
 
 **The folder browser does not recognise the game.** Make sure you are in
 the folder that holds the game's program and data, not one above or

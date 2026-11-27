@@ -135,6 +135,37 @@ fn to_window(window: &Window, (width, height): (u32, u32), r: Rect) -> sdl2::rec
 }
 
 /// Opens a window and runs `app` until it quits or the window is closed.
+/// VNRevival's icon, for the title bar and the task bar.
+const ICON_PNG: &[u8] = include_bytes!("../../../assets/icon/vnrevival-256.png");
+
+/// Gives the window VNRevival's icon. A window without it still works,
+/// so a failure is ignored.
+fn set_icon(window: &mut Window) {
+    let decoder = png::Decoder::new(std::io::Cursor::new(ICON_PNG));
+    let Ok(mut reader) = decoder.read_info() else {
+        return;
+    };
+    let Some(size) = reader.output_buffer_size() else {
+        return;
+    };
+    let mut pixels = vec![0; size];
+    let Ok(info) = reader.next_frame(&mut pixels) else {
+        return;
+    };
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return;
+    }
+    if let Ok(surface) = sdl2::surface::Surface::from_data(
+        &mut pixels,
+        info.width,
+        info.height,
+        info.line_size as u32,
+        PixelFormatEnum::RGBA32,
+    ) {
+        window.set_icon(surface);
+    }
+}
+
 pub fn run(app: &mut Shell, mixer: &Mixer, scale: u32) -> Result<(), String> {
     let sdl = sdl2::init()?;
     let video = sdl.video()?;
@@ -148,13 +179,14 @@ pub fn run(app: &mut Shell, mixer: &Mixer, scale: u32) -> Result<(), String> {
     text_input.stop();
     let mut typing: Option<Rect> = None;
 
-    let window = video
+    let mut window = video
         .window(&app.title(), width * scale, height * scale)
         .position_centered()
         .resizable()
         .allow_highdpi()
         .build()
         .map_err(|e| e.to_string())?;
+    set_icon(&mut window);
     let mut screen = window
         .into_canvas()
         .present_vsync()

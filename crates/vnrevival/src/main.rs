@@ -3,14 +3,24 @@
 //! `run` opens the game library, or a game folder directly, in a window
 //! (SDL2), or runs without one for a fixed number of frames and saves a
 //! screenshot (`--frames`). Every game is shown inside VNRevival's own
-//! interface ([`vnr_core::shell`]).
+//! interface ([`vnr_core::shell`]). Without a command, `run` is assumed,
+//! so that opening the executable from a file manager shows the library.
+//!
+//! On Windows the executable is a GUI program, so that no console window
+//! opens with it; started from a terminal it writes to that terminal
+//! ([`console`]). Errors that would otherwise go unseen are shown in a
+//! message box.
 
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
+mod console;
 mod sdl;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+use sdl2::messagebox::{MessageBoxFlag, show_simple_message_box};
 use vnr_core::shell::{Shell, ShellOptions};
 use vnr_core::{
     Backend, GameInfo, InputEvent, LaunchOptions, Launcher, Mixer, MouseButton, Session, Start,
@@ -22,8 +32,9 @@ const MIXER_CHANNELS: usize = 8;
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
+    /// What to do (default: `run`, which opens the library).
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -36,40 +47,43 @@ enum Command {
     /// List the supported engines.
     Engines,
     /// Play: open the game library, or a game folder directly.
-    Run {
-        /// Game install folder (it is added to the library); without it
-        /// the library opens.
-        game: Option<PathBuf>,
-        /// Start from this script instead of the default (engine-specific).
-        #[arg(long)]
-        script: Option<String>,
-        /// Font file to use instead of the system's Japanese fonts.
-        #[arg(long)]
-        font: Option<PathBuf>,
-        /// Folder for saved games (default: a folder per game in the
-        /// user's data directory).
-        #[arg(long)]
-        saves: Option<PathBuf>,
-        /// Initial window size as a multiple of the interface (1280 × 720).
-        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=3))]
-        scale: u32,
-        /// Skip VNRevival's menu and start a new game at once.
-        #[arg(long)]
-        new_game: bool,
-        /// Run without a window for this many frames (60 per second).
-        #[arg(long)]
-        frames: Option<u64>,
-        /// With --frames: save the last frame as a PNG.
-        #[arg(long, requires = "frames")]
-        screenshot: Option<PathBuf>,
-        /// With --frames: click every N frames to advance the text.
-        #[arg(long, requires = "frames")]
-        click_every: Option<u64>,
-        /// Where --click-every clicks, as X,Y in interface pixels
-        /// (1280 × 720).
-        #[arg(long, value_parser = parse_point, default_value = "0,0")]
-        click_at: (i32, i32),
-    },
+    Run(RunArgs),
+}
+
+#[derive(Args)]
+struct RunArgs {
+    /// Game install folder (it is added to the library); without it
+    /// the library opens.
+    game: Option<PathBuf>,
+    /// Start from this script instead of the default (engine-specific).
+    #[arg(long)]
+    script: Option<String>,
+    /// Font file to use instead of the system's Japanese fonts.
+    #[arg(long)]
+    font: Option<PathBuf>,
+    /// Folder for saved games (default: a folder per game in the
+    /// user's data directory).
+    #[arg(long)]
+    saves: Option<PathBuf>,
+    /// Initial window size as a multiple of the interface (1280 × 720).
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=3))]
+    scale: u32,
+    /// Skip VNRevival's menu and start a new game at once.
+    #[arg(long)]
+    new_game: bool,
+    /// Run without a window for this many frames (60 per second).
+    #[arg(long)]
+    frames: Option<u64>,
+    /// With --frames: save the last frame as a PNG.
+    #[arg(long, requires = "frames")]
+    screenshot: Option<PathBuf>,
+    /// With --frames: click every N frames to advance the text.
+    #[arg(long, requires = "frames")]
+    click_every: Option<u64>,
+    /// Where --click-every clicks, as X,Y in interface pixels
+    /// (1280 × 720).
+    #[arg(long, value_parser = parse_point, default_value = "0,0")]
+    click_at: (i32, i32),
 }
 
 /// Every backend, in detection order.
@@ -78,43 +92,49 @@ fn backends() -> Vec<Box<dyn Backend>> {
 }
 
 fn main() -> ExitCode {
-    match Cli::parse().command {
+    let has_console = console::attach();
+    if !has_console {
+        install_panic_box();
+    }
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) if has_console => e.exit(),
+        Err(e) => {
+            let flag = if e.use_stderr() {
+                MessageBoxFlag::ERROR
+            } else {
+                MessageBoxFlag::INFORMATION
+            };
+            // The message box is the only way to be seen; nothing else
+            // to do if it fails too.
+            let _ = show_simple_message_box(flag, "VNRevival", &e.render().to_string(), None);
+            return ExitCode::from(u8::try_from(e.exit_code()).unwrap_or(2));
+        }
+    };
+    let command = cli
+        .command
+        .unwrap_or_else(|| Command::Run(RunArgs::default()));
+    match command {
         Command::Engines => {
             for backend in backends() {
                 println!("{:<8} {}", backend.id(), backend.name());
             }
             ExitCode::SUCCESS
         }
-        Command::Run {
-            game,
-            script,
-            font,
-            saves,
-            scale,
-            new_game,
-            frames,
-            screenshot,
-            click_every,
-            click_at,
-        } => {
-            let options = LaunchOptions {
-                entry: script,
-                font,
-                saves,
-            };
-            let clicks = click_every.map(|n| (n, click_at));
-            let shell = match &game {
-                Some(game) => shell(game, &options, new_game),
-                None => launcher_shell(&options),
-            };
-            let result = shell.and_then(|mut shell| match frames {
-                Some(frames) => run_headless(&mut shell, frames, clicks, screenshot.as_deref()),
-                None => sdl::run(&mut shell, &Mixer::new(MIXER_CHANNELS), scale),
-            });
-            match result {
+        Command::Run(args) => {
+            let windowed = args.frames.is_none();
+            match run(args) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(message) => {
                     eprintln!("error: {message}");
+                    if windowed || !has_console {
+                        let _ = show_simple_message_box(
+                            MessageBoxFlag::ERROR,
+                            "VNRevival",
+                            &message,
+                            None,
+                        );
+                    }
                     ExitCode::FAILURE
                 }
             }
@@ -134,6 +154,47 @@ fn main() -> ExitCode {
             }
         },
     }
+}
+
+impl Default for RunArgs {
+    /// `run` with no arguments: the library.
+    fn default() -> Self {
+        #[derive(Parser)]
+        struct Defaults {
+            #[command(flatten)]
+            run: RunArgs,
+        }
+        Defaults::parse_from(["vnrevival"]).run
+    }
+}
+
+/// Opens the library or a game and plays it, in a window or headless.
+fn run(args: RunArgs) -> Result<(), String> {
+    let options = LaunchOptions {
+        entry: args.script,
+        font: args.font,
+        saves: args.saves,
+    };
+    let clicks = args.click_every.map(|n| (n, args.click_at));
+    let mut shell = match &args.game {
+        Some(game) => shell(game, &options, args.new_game)?,
+        None => launcher_shell(&options)?,
+    };
+    match args.frames {
+        Some(frames) => run_headless(&mut shell, frames, clicks, args.screenshot.as_deref()),
+        None => sdl::run(&mut shell, &Mixer::new(MIXER_CHANNELS), args.scale),
+    }
+}
+
+/// Without a console a panic would end the program silently: show its
+/// message in a message box as well.
+fn install_panic_box() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default(info);
+        let message = format!("VNRevival stopped because of an internal error.\n\n{info}");
+        let _ = show_simple_message_box(MessageBoxFlag::ERROR, "VNRevival", &message, None);
+    }));
 }
 
 /// Detects the game in `dir` and opens it with its backend.
@@ -284,6 +345,23 @@ fn print_info(info: &GameInfo) {
 mod tests {
     use super::*;
     use vnr_core::{Canvas, Key};
+
+    #[test]
+    fn command_line_is_consistent() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    /// Opened without arguments (as from a file manager), VNRevival runs
+    /// the library with the default options.
+    #[test]
+    fn no_command_means_the_library() {
+        let cli = Cli::try_parse_from(["vnrevival"]).unwrap();
+        assert!(cli.command.is_none());
+        let args = RunArgs::default();
+        assert!(args.game.is_none() && args.frames.is_none() && !args.new_game);
+        assert_eq!((args.scale, args.click_at), (1, (0, 0)));
+    }
 
     /// Goes through the interface with Pure Mail: menu, a new game, the
     /// pause menu, settings, history and saves (needs `ADV2_GAME_DIR`;

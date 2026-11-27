@@ -7,7 +7,9 @@ and plays them on Windows, Linux and macOS.
 
 VNRevival ships **no game data**.
 
-Players: see the **[user manual](docs/MANUAL.md)**.
+Players: download VNRevival for Windows, macOS or Linux from the
+[releases](https://github.com/Yamato6/VNRevival/releases) and see the
+**[user manual](docs/MANUAL.md)**.
 
 ## Supported engines
 
@@ -57,6 +59,12 @@ cargo run --release -- detect "<game dir>" # identify a game install
 cargo run --release -- run                 # the game library
 cargo run --release -- run "<game dir>"    # play a game directly
 ```
+
+Without a command, `run` is assumed: opening the executable from a file
+manager shows the library. On Windows it is a GUI program (no console
+window); started from a terminal it still prints there, but the
+terminal does not wait for it (in PowerShell, `Start-Process -Wait
+-NoNewWindow` does). Errors are also shown in a message box.
 
 `run` without a folder opens the **library**: the games you added, with
 their cover and when you last played. "Add game…" opens a folder
@@ -193,9 +201,13 @@ or the closest substitute installed. When the chosen font is missing the
 next one available is used. Variable fonts (such as `NotoSansJP-VF.ttf`
 from Google Fonts) are drawn at a regular weight, with a real bold.
 
-Noto Sans JP is free (SIL Open Font License): install it from Google
-Fonts on Windows and macOS, or `fonts-noto-cjk` on Linux. `--font`
-picks a font file for both instead of the settings.
+Noto Sans JP is free (SIL Open Font License) and the release packages
+include it: VNRevival also looks for fonts in `fonts` next to the
+executable, `../Resources/fonts` (macOS app) and
+`../share/vnrevival/fonts` (AppImage), after the installed ones. A
+build of your own uses the installed fonts: install Noto Sans JP from
+Google Fonts on Windows and macOS, or `fonts-noto-cjk` on Linux.
+`--font` picks a font file for both instead of the settings.
 
 ## Building and testing
 
@@ -223,6 +235,32 @@ points at the install, e.g. `ADV2_GAME_DIR` for Pure Mail:
 ```sh
 ADV2_GAME_DIR="/path/to/PMAILDVD" cargo test
 ```
+
+### Release packages
+
+Pushing a tag `vX.Y.Z` that matches the version in `Cargo.toml` runs
+[`release.yml`](.github/workflows/release.yml): it builds and packs
+VNRevival on each system with [`packaging/package.sh`](packaging/package.sh)
+and creates a **draft** release with the packages, to be checked and
+published by hand. Running the workflow by hand (*Actions → Release →
+Run workflow*) builds the packages as artifacts only.
+
+| Package | Contents |
+|---|---|
+| `VNRevival-<v>-windows-x64.zip` | `VNRevival.exe` (C runtime linked in, icon and version embedded), `fonts/` |
+| `VNRevival-<v>-macos.dmg` | `VNRevival.app`, one binary for Intel and Apple Silicon, macOS 11+, ad-hoc signed |
+| `VNRevival-<v>-linux-x64.AppImage` | the program, its font, icon and desktop entry, built on Ubuntu 22.04 |
+| `VNRevival-<v>-linux-x64.tar.gz` | the same as a plain folder |
+
+Each also holds the license, the manual and Noto Sans JP with its
+license (`OFL.txt`), downloaded from a pinned commit of
+[google/fonts](https://github.com/google/fonts) and checked against a
+SHA-256. The icon is drawn by
+[`assets/icon/make_icon.py`](assets/icon/make_icon.py) (Pillow).
+
+To pack by hand, build in release mode and run
+`packaging/package.sh windows|linux|macos <binary>` (Git Bash on
+Windows); the package goes to `dist/`.
 
 ### Working on VNTools-rs at the same time
 

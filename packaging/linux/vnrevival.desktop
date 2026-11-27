@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=VNRevival
+Comment=Play old visual novels from your own copy
+Exec=vnrevival
+Icon=vnrevival
+Terminal=false
+Categories=Game;AdventureGame;

@@ -13,6 +13,19 @@ vnr-core.workspace = true
 vnr-adv2.workspace = true
 clap.workspace = true
 sdl2.workspace = true
+png.workspace = true
 
-[lints]
-workspace = true
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
+[build-dependencies]
+# Icon and version information of the Windows executable.
+winresource = "0.1.34"
+
+# The workspace lints, except that `unsafe_code` is denied instead of
+# forbidden: the Windows console module needs one FFI call.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
