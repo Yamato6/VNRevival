@@ -290,7 +290,7 @@ dependencies = [
 [[package]]
 name = "indeo"
 version = "0.1.0"
-source = "git+https://github.com/Yamato6/VNTools-rs#8fda478d0fd27b6ee2b71bd10b53d98abc3cb70b"
+source = "git+https://github.com/Yamato6/VNTools-rs#454b5d6c80e6522ef1882fd2e429219651b7b691"
 dependencies = [
  "thiserror",
 ]
@@ -374,7 +374,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "overflow-adv2"
 version = "0.1.0"
-source = "git+https://github.com/Yamato6/VNTools-rs#8fda478d0fd27b6ee2b71bd10b53d98abc3cb70b"
+source = "git+https://github.com/Yamato6/VNTools-rs#454b5d6c80e6522ef1882fd2e429219651b7b691"
 dependencies = [
  "encoding_rs",
  "thiserror",

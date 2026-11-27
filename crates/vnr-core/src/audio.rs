@@ -63,6 +63,8 @@ struct Voice {
     frame: usize,
     volume: u16,
     paused: bool,
+    /// Fading out: frames left, of how many.
+    fade: Option<(usize, usize)>,
 }
 
 #[derive(Debug)]
@@ -101,6 +103,7 @@ impl Mixer {
                 frame: 0,
                 volume,
                 paused: false,
+                fade: None,
             });
         }
     }
@@ -128,6 +131,21 @@ impl Mixer {
     pub fn set_volume(&self, channel: usize, volume: u16) {
         if let Some(Some(voice)) = self.lock().channels.get_mut(channel) {
             voice.volume = volume;
+        }
+    }
+
+    /// Lowers a channel to silence over `frames` stereo frames, then
+    /// stops it (at once for 0).
+    pub fn fade_out(&self, channel: usize, frames: usize) {
+        if let Some(slot) = self.lock().channels.get_mut(channel) {
+            match slot {
+                Some(_) if frames == 0 => *slot = None,
+                Some(voice) => {
+                    let left = voice.fade.map_or(frames, |(left, _)| left.min(frames));
+                    voice.fade = Some((left, frames.max(left)));
+                }
+                None => {}
+            }
         }
     }
 
@@ -164,7 +182,19 @@ impl Mixer {
             let samples = &voice.clip.samples;
             let gain = i32::from(voice.volume) * master;
             let mut i = 0;
+            let mut faded = false;
             while i + 1 < acc.len() {
+                let gain = match &mut voice.fade {
+                    Some((0, _)) => {
+                        faded = true;
+                        break;
+                    }
+                    Some((left, total)) => {
+                        *left -= 1;
+                        (i64::from(gain) * (*left + 1) as i64 / *total as i64) as i32
+                    }
+                    None => gain,
+                };
                 if voice.frame >= voice.clip.frames() {
                     match voice.clip.loop_start {
                         Some(start) if voice.clip.frames() > 0 => voice.frame = start,
@@ -177,7 +207,8 @@ impl Mixer {
                 voice.frame += 1;
                 i += 2;
             }
-            if voice.frame >= voice.clip.frames() && !voice.clip.is_looping() {
+            let done = voice.frame >= voice.clip.frames() && !voice.clip.is_looping();
+            if done || faded || voice.fade.is_some_and(|(left, _)| left == 0) {
                 *slot = None;
             }
         }
@@ -234,6 +265,23 @@ mod tests {
         assert_eq!(mixer.position(0), Some(2));
         mixer.stop(0);
         assert_eq!(mixer.position(0), None);
+    }
+
+    #[test]
+    fn fades_out_and_stops() {
+        let mixer = Mixer::new(1);
+        let clip = Clip::mono(&[1000]).looping_from(0);
+        mixer.play(0, Arc::new(clip), FULL_VOLUME);
+        mixer.fade_out(0, 4);
+        let mut out = [0i16; 10];
+        mixer.mix(&mut out);
+        let left: Vec<i16> = out.iter().step_by(2).copied().collect();
+        assert_eq!(left, [1000, 750, 500, 250, 0]);
+        assert!(!mixer.is_playing(0));
+        // A fade of nothing stops at once.
+        mixer.play(0, Arc::new(Clip::mono(&[1, 2])), FULL_VOLUME);
+        mixer.fade_out(0, 0);
+        assert!(!mixer.is_playing(0));
     }
 
     #[test]

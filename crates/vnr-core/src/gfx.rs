@@ -161,6 +161,12 @@ impl Canvas {
         &self.pixels
     }
 
+    /// The pixels, to change them directly (`R, G, B, A` with `A` kept
+    /// at 255, rows top-down).
+    pub fn rgba_mut(&mut self) -> &mut [u8] {
+        &mut self.pixels
+    }
+
     /// Colour of one pixel.
     pub fn pixel(&self, x: u32, y: u32) -> Color {
         let i = (y as usize * self.width as usize + x as usize) * 4;

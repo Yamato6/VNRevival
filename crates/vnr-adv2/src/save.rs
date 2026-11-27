@@ -7,11 +7,14 @@
 //!
 //! The original engine's own save files are not read or written.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::backlog::History;
 use crate::names::Names;
 use crate::pc::{Line, PcView};
+use crate::roll::Memories;
 use crate::vm::Snapshot;
 
 /// Format version written to every save.
@@ -46,6 +49,10 @@ pub struct EngineState {
     /// The hero's names (missing in older saves: the defaults).
     #[serde(default)]
     pub names: Names,
+    /// Each heroine's memories for her staff roll (missing in older
+    /// saves).
+    #[serde(default)]
+    pub memories: BTreeMap<i32, Memories>,
     pub mode: SavedMode,
 }
 
@@ -106,6 +113,10 @@ mod tests {
                 letter: vec![],
                 history: History::default(),
                 names: Names::default(),
+                memories: BTreeMap::from([(
+                    3,
+                    Memories(vec![("hiro01".into(), "V30070122".into())]),
+                )]),
                 mode: SavedMode::Click,
             },
         }
@@ -118,5 +129,6 @@ mod tests {
         assert_eq!(back.machine, sample().machine);
         assert_eq!(back.engine.chat_log, sample().engine.chat_log);
         assert_eq!(back.engine.mode, SavedMode::Click);
+        assert_eq!(back.engine.memories, sample().engine.memories);
     }
 }

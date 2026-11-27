@@ -37,8 +37,16 @@
 //! | `18`, `d8` | clear the history and the chat log | `0x421d00`, `0x4220f0` |
 //! | `d7` | unlock a scene of the replay list | `0x421f50`; see [`crate::system`] |
 //! | `35` | play a movie (`MOVIE/<name>L_I5.AVI`); a click ends it | strings of `PMAIL.EXE`, `OF_ADV2.INI`; see [`crate::movie`] |
+//! | `74`, `64` | fade out the music, the sound effect (time code 0–4) | `0x4246f0`, `0x424050`; see [`fade_frames`] |
+//! | `d6` | record a memory of a heroine (picture, voice) | `0x421fc0`; see [`crate::roll`] |
+//! | `d3` | the ending's staff roll (heroine, music track) | `0x422090`, `0x411260`; see [`crate::roll`] |
+//! | `89` | the calendar's voice: a heroine says the date | `0x424190`; see [`calendar_voice`] |
+//! | `15` | developer warning: printed on stderr | `0x422d40` |
+//! | `19` | branch label, shown by the original in its window title (`%s - [%s][%s]`); nothing to do | `0x422530` |
 //!
-//! Everything else is ignored for now and reported once on stderr.
+//! `d0`–`d2` and `d4` belong to the original's extras menu
+//! (`extra.obj`), which VNRevival replaces. Everything else is ignored for
+//! now and reported once on stderr.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -58,6 +66,7 @@ use crate::movie::Movie;
 use crate::names::Names;
 use crate::options::GameOptions;
 use crate::pc::{self, Label, Line, Mail, PcView, Popup};
+use crate::roll::{self, Cue, Memories, Page};
 use crate::save::{self, EngineState, SaveFile, SavedMode, SceneState};
 use crate::system::{self, HeardTracks, ReadMessages, SystemData};
 use crate::transition::{self, Effect, MorningPictures, Transition};
@@ -157,6 +166,8 @@ enum Mode {
     Wait(u64),
     /// Waiting for a click.
     Click,
+    /// The staff roll of an ending.
+    Roll,
     /// Waiting for a transition to end.
     Transition,
     /// Stopped while a menu is open.
@@ -294,6 +305,68 @@ pub struct Engine {
     click_chars: usize,
     /// `sys 17` is waiting for the names.
     asking_names: bool,
+    /// Each heroine's memories (`sys d6`).
+    memories: BTreeMap<i32, Memories>,
+    /// The staff roll playing.
+    roll: Option<StaffRoll>,
+}
+
+/// A staff roll in progress (see [`crate::roll`]).
+struct StaffRoll {
+    heroine: i32,
+    /// Frame it started at.
+    start: u64,
+    /// Milliseconds since then, as of the last frame.
+    now: u64,
+    cues: Vec<(u64, Cue)>,
+    next: usize,
+    page: Option<Page>,
+    /// A click or a key ends it.
+    can_skip: bool,
+}
+
+/// Mixer frames of a fade-out with time code `code` (`sys 74`, `64`).
+///
+/// The engine lowers the volume in 256 steps of `period` samples, where
+/// `period` is a base scaled by the code: × 1, ½, 2, ¼, 4 for codes 0–4,
+/// and the code itself above that (`0x407290`). The base is 43 after the
+/// sound setup at `0x407600`; whether that runs in every configuration is
+/// not known, so the lengths (¼, ⅛, ½, 1/16 and 1 second) are provisional.
+pub fn fade_frames(code: i32) -> usize {
+    const BASE: i32 = 43;
+    let period = match code {
+        0 => BASE,
+        1 => BASE / 2,
+        2 => BASE * 2,
+        3 => BASE / 4,
+        4 => BASE * 4,
+        other => other.max(0),
+    };
+    256 * period as usize
+}
+
+/// The voice of the calendar (`sys 89`): character `who` saying date
+/// `day` (`MMDD`, from June 13 to July 22), as `V<c><kind><c>00<nn>`.
+/// Characters 3–9 speak for themselves with kind 51; 10 and 11 are
+/// character 3 with kinds 53 and 55, 12 is character 9 with kind 51
+/// (`0x424190`).
+pub fn calendar_voice(who: i32, day: i32) -> Option<String> {
+    let n = match day {
+        613..=630 => day - 612,
+        701..=722 => day - 682,
+        _ => return None,
+    };
+    let (c, kind) = match who {
+        3..=9 => (who, 51),
+        10 => (3, 53),
+        11 => (3, 55),
+        12 => (9, 51),
+        0 => (0, 51),
+        1 => (1, 53),
+        2 => (2, 55),
+        _ => return None,
+    };
+    Some(format!("V{c}{kind}{c}00{n:02}"))
 }
 
 impl Engine {
@@ -402,6 +475,141 @@ impl Engine {
         self.names = self.options.names.clone();
         self.reveal = 0.0;
         self.movie = None;
+        self.memories.clear();
+        self.roll = None;
+    }
+
+    /// `sys d3`: starts the staff roll of `heroine` with music `track`.
+    fn start_roll(&mut self, heroine: i32, track: i32) -> Control {
+        self.window_visible = false;
+        self.play_music(Some(track));
+        let seen =
+            self.system.flag(roll::ending_flag(heroine)) != 0 || self.system.flag(0x136) != 0;
+        self.roll = Some(StaffRoll {
+            heroine,
+            start: self.frame,
+            now: 0,
+            cues: roll::timeline(),
+            next: 0,
+            page: None,
+            can_skip: seen,
+        });
+        self.mode = Mode::Roll;
+        Control::Yield
+    }
+
+    /// Runs the staff roll up to frame `frame`; `skip` asks to end it.
+    fn tick_roll(&mut self, frame: u64, skip: bool) {
+        let Some(roll) = &mut self.roll else {
+            self.mode = Mode::Running;
+            return;
+        };
+        roll.now = frame.saturating_sub(roll.start) * 1000 / u64::from(vnr_core::FPS);
+        // A skip goes to the last pictures, unless they are on already.
+        let last_pictures_due = roll.cues[roll.next..]
+            .iter()
+            .any(|c| matches!(c.1, Cue::Ending { picture: 2, .. }));
+        if skip && roll.can_skip && last_pictures_due {
+            roll.cues.truncate(roll.next);
+            roll.cues.extend(roll::skip_tail(roll.now));
+            roll.page = None;
+        }
+        let heroine = roll.heroine;
+        let mut due = Vec::new();
+        while let Some(&(at, cue)) = roll.cues.get(roll.next) {
+            if at > roll.now {
+                break;
+            }
+            due.push((at, cue));
+            roll.next += 1;
+        }
+        for (at, cue) in due {
+            self.roll_cue(heroine, at, cue);
+        }
+    }
+
+    fn roll_cue(&mut self, heroine: i32, at: u64, cue: Cue) {
+        let ending = |n: u8| format!("END{heroine:02}_{n:02}");
+        match cue {
+            Cue::Ending { picture, slow } => {
+                let name = ending(picture);
+                self.staged = Scene {
+                    background: self.assets.picture(&name, &["crgb"]),
+                    background_name: Some(name),
+                    ..Scene::default()
+                };
+                self.present(Effect::Fade, transition::step(if slow { 4 } else { 0 }));
+            }
+            Cue::Memory(slot) => {
+                let name = ending(1);
+                let mut scene = Scene {
+                    background: self.assets.picture(&name, &["crgb"]),
+                    background_name: Some(name),
+                    ..Scene::default()
+                };
+                let picture = self
+                    .memories
+                    .get(&heroine)
+                    .and_then(|m| m.slot(slot))
+                    .map(str::to_string);
+                if let Some(picture) = picture
+                    && let Some(sprite) = self.assets.picture(&picture, &["edg"])
+                {
+                    scene
+                        .characters
+                        .insert(0, Arc::new(roll::place(&sprite, (WIDTH, HEIGHT))));
+                    scene.character_names.insert(0, picture);
+                }
+                self.staged = scene;
+                self.present(Effect::Fade, transition::step(0));
+            }
+            Cue::Page(n) => {
+                let flags = (self.system.flag(0x10d) != 0, self.system.flag(0x10e) != 0);
+                let file = roll::page_file(n, flags.0, flags.1);
+                let page = match self.assets.gray(&file) {
+                    Some((608, _, rows)) => Some(Page {
+                        rows,
+                        start: at,
+                        height: roll::PAGES[n].1,
+                    }),
+                    _ => {
+                        eprintln!("staff roll page {file} not found");
+                        None
+                    }
+                };
+                if let Some(roll) = &mut self.roll {
+                    roll.page = page;
+                }
+            }
+            Cue::FadeMusic => {
+                self.music = None;
+                if let Some(mixer) = &self.mixer {
+                    mixer.fade_out(CHANNEL_MUSIC, fade_frames(4));
+                }
+            }
+            Cue::End => {
+                self.roll = None;
+                self.play_music(None);
+                self.system.set_flag(roll::ending_flag(heroine), 1);
+                if let Err(e) = self.system.store() {
+                    eprintln!("could not save the system data: {e}");
+                }
+                if self.mode == Mode::Roll {
+                    self.mode = Mode::Running;
+                }
+            }
+        }
+    }
+
+    /// `sys 74` / `64`: fades a channel out.
+    fn fade(&mut self, channel: usize, code: i32) {
+        if channel == CHANNEL_MUSIC {
+            self.music = None;
+        }
+        if let Some(mixer) = &self.mixer {
+            let frames = if self.skipping { 0 } else { fade_frames(code) };
+            mixer.fade_out(channel, frames);
+        }
     }
 
     /// `sys 35`: plays a movie and waits for it.
@@ -757,8 +965,37 @@ impl Host for Engine {
                     return self.wait_click(0);
                 }
             }
-            // Desktop shortcuts to other installed games; screen backup.
-            0x32 | 0x41 => {}
+            // Desktop shortcuts to other installed games; screen backup;
+            // a branch label for the window title.
+            0x32 | 0x41 | 0x19 => {}
+            0x15 => eprintln!("note from the script: {}", text(0)),
+            0x74 => {
+                let code = num(vm, self, 0);
+                self.fade(CHANNEL_MUSIC, code);
+            }
+            0x64 => {
+                let code = num(vm, self, 0);
+                self.fade(CHANNEL_SOUND, code);
+            }
+            0xD6 => {
+                let heroine = num(vm, self, 0);
+                self.memories
+                    .entry(heroine)
+                    .or_default()
+                    .record(text(1), text(2));
+            }
+            0xD3 => {
+                let (heroine, track) = (num(vm, self, 0), num(vm, self, 1));
+                return self.start_roll(heroine, track);
+            }
+            0x89 => {
+                let (who, day) = (num(vm, self, 0), num(vm, self, 1));
+                let speaks = calendar_voice(who, day).filter(|_| !self.skipping);
+                if let Some(voice) = speaks {
+                    let clip = self.assets.voice(&voice);
+                    self.play(CHANNEL_VOICE, clip);
+                }
+            }
             0x33 => {
                 let kind = num(vm, self, 0);
                 let at = (num(vm, self, 1), num(vm, self, 2));
@@ -1074,6 +1311,8 @@ impl Game {
             message_done: None,
             click_chars: 0,
             asking_names: false,
+            memories: BTreeMap::new(),
+            roll: None,
         };
         Ok(Self {
             title,
@@ -1197,6 +1436,7 @@ impl Game {
                 letter: e.letter.clone(),
                 history: e.history.clone(),
                 names: e.names.clone(),
+                memories: e.memories.clone(),
                 mode,
             },
         };
@@ -1261,6 +1501,7 @@ impl Game {
         e.letter = state.letter;
         e.history = state.history;
         e.names = state.names;
+        e.memories = state.memories;
         e.skipping = false;
         e.hidden = false;
         e.event = None;
@@ -1327,6 +1568,7 @@ impl Game {
                 .is_some_and(|m| m.is_playing(CHANNEL_VOICE));
         let line = e.player.line_height(e.player.text_px());
         let mut answer: Option<(Option<u16>, i32)> = None;
+        let mut roll = false;
         match &mut e.mode {
             Mode::Message { text, shown, .. } => {
                 let total = text.chars().count();
@@ -1421,7 +1663,11 @@ impl Game {
                     e.end_movie();
                 }
             }
+            Mode::Roll => roll = true,
             Mode::Running | Mode::Paused | Mode::Ended(_) => {}
+        }
+        if roll {
+            self.engine.tick_roll(frame.number, advance);
         }
         if let Some((variable, value)) = answer {
             if let Some(var) = variable {
@@ -1434,6 +1680,10 @@ impl Game {
 
     fn draw_text_box(&mut self, canvas: &mut Canvas) {
         let e = &mut self.engine;
+        // The staff roll draws over the whole screen.
+        if e.roll.is_some() {
+            return;
+        }
         if !e.chapter.is_empty() {
             let style = TextStyle {
                 size: 18.0,
@@ -1662,6 +1912,11 @@ impl Session for Game {
         }
         for popup in &self.engine.popups {
             popup.draw(frame.canvas, frame.number);
+        }
+        if let Some(roll) = &self.engine.roll
+            && let Some(page) = &roll.page
+        {
+            page.draw(frame.canvas, roll.now);
         }
         self.draw_title(frame.canvas);
         self.draw_text_box(frame.canvas);
@@ -1953,6 +2208,103 @@ mod tests {
             }
         }
         panic!("{name}: not reached in {limit} frames");
+    }
+
+    /// The staff roll shows a recorded memory and scrolls its pages; an
+    /// ending already seen can be skipped, and the roll marks it seen
+    /// (needs `ADV2_GAME_DIR`).
+    #[test]
+    fn staff_roll_shows_memories_and_pages() {
+        let Some(mut game) = open(Some("PRO1")) else {
+            eprintln!("ADV2_GAME_DIR not set or no font, skipping");
+            return;
+        };
+        game.start(Start::NewGame).unwrap();
+        let mixer = Mixer::new(CHANNELS);
+        let mut canvas = Canvas::new(WIDTH, HEIGHT);
+        step(&mut game, &mixer, &mut canvas, 0, &[]);
+        for _ in 0..roll::MEMORIES {
+            game.engine
+                .memories
+                .entry(3)
+                .or_default()
+                .record("hiro01".into(), "V30070122".into());
+        }
+        let start = game.engine.frame;
+        assert_eq!(game.engine.start_roll(3, 23), Control::Yield);
+        assert_eq!(game.engine.mode, Mode::Roll);
+        assert!(mixer.is_playing(CHANNEL_MUSIC));
+
+        // Halfway through the first page; the memory is in the last slot.
+        let cues = roll::timeline();
+        let page0 = cues.iter().find(|c| c.1 == Cue::Page(0)).unwrap().0;
+        let at = page0 + 300 * 13;
+        let mut number = start;
+        while game.engine.roll.as_ref().is_none_or(|r| r.now < at) {
+            number += 1;
+            step(&mut game, &mixer, &mut canvas, number, &[]);
+        }
+        shoot(&canvas, "staff-roll");
+        let roll = game.engine.roll.as_ref().unwrap();
+        assert!(roll.page.as_ref().is_some_and(|p| p.scrolling(roll.now)));
+        // The window has dark text on the light background.
+        let dark = (70..530)
+            .flat_map(|y| (556..756).map(move |x| (x, y)))
+            .filter(|&(x, y)| canvas.pixel(x, y).r < 100)
+            .count();
+        assert!(dark > 200, "only {dark} dark pixels in the roll window");
+        // The memory's picture is at the left, over the background.
+        assert_eq!(
+            game.engine
+                .shown
+                .character_names
+                .get(&0)
+                .map(String::as_str),
+            Some("hiro01")
+        );
+
+        // Not seen before: no skipping.
+        number += 1;
+        step(
+            &mut game,
+            &mixer,
+            &mut canvas,
+            number,
+            &[click_at(400, 300)],
+        );
+        assert_eq!(game.engine.mode, Mode::Roll);
+        // Seen: a click goes to the last pictures, then it ends.
+        game.engine.roll.as_mut().unwrap().can_skip = true;
+        number += 1;
+        step(
+            &mut game,
+            &mixer,
+            &mut canvas,
+            number,
+            &[click_at(400, 300)],
+        );
+        let limit = number + (2 * roll::SLOW_FADE_MS * 60 / 1000) + 10;
+        while game.engine.mode == Mode::Roll {
+            number += 1;
+            assert!(number < limit, "the roll did not end");
+            step(&mut game, &mixer, &mut canvas, number, &[]);
+        }
+        assert!(game.engine.roll.is_none());
+        assert_eq!(game.engine.system.flag(roll::ending_flag(3)), 1);
+        assert_eq!(game.engine.music, None);
+    }
+
+    #[test]
+    fn fades_and_calendar_voices() {
+        assert_eq!(fade_frames(0), 256 * 43);
+        assert_eq!(fade_frames(4), 256 * 172);
+        assert_eq!(fade_frames(3), 256 * 10);
+        assert_eq!(fade_frames(7), 256 * 7);
+        assert_eq!(calendar_voice(3, 613).as_deref(), Some("V35130001"));
+        assert_eq!(calendar_voice(12, 722).as_deref(), Some("V95190040"));
+        assert_eq!(calendar_voice(10, 701).as_deref(), Some("V35330019"));
+        assert_eq!(calendar_voice(3, 631), None);
+        assert_eq!(calendar_voice(13, 701), None);
     }
 
     /// Larger text, an outline and high contrast: the box grows to fit

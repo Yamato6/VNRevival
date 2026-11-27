@@ -105,8 +105,10 @@ voices, choices, backgrounds, character sprites, colour fills,
 transitions with the original timings (cross-fade and the "morning light"
 wipe), waits, music, sound effects and voices, and the in-game PC:
 the chat client, the mailer, letters, text labels, the taskbar clock,
-pop-up animations and the opening movie (Indeo 5, decoded by VNTools-rs;
-a click ends it). "New game" in VNRevival's menu runs the game's
+pop-up animations, the opening movie (Indeo 5, decoded by VNTools-rs;
+a click ends it), music and sound fade-outs, the calendar's voices, and
+each ending's staff roll with the heroine's memories (an ending already
+seen can be skipped with a click). "New game" in VNRevival's menu runs the game's
 start-up unseen and answers its title; with the original title screen,
 its load button opens VNRevival's load screen.
 Still missing: several effects; engine functions that are not implemented are skipped and

@@ -14,6 +14,7 @@ pub mod movie;
 pub mod names;
 pub mod options;
 pub mod pc;
+pub mod roll;
 pub mod save;
 pub mod system;
 pub mod transition;
