@@ -31,6 +31,10 @@
 //! | `63`, `83` | stop the sound effect, the voice | `0x426e00`, `0x424590` |
 //! | `65`, `85` | wait until the sound effect, the voice ends | `0x424000`, `0x4245c0` |
 //! | `a0`–`c3`, `33`, `34`, `50` | the in-game PC | see [`crate::pc`] |
+//! | `11` | clear the game variables (ids below `0x4000`) | `0x401040` |
+//! | `13`, `14` | restore points of the original's save (nothing to do) | `0x425730`, `0x425de0` |
+//! | `17` | new game: take the hero's names from the settings (the original asks in a dialog) | `0x421d20`; see [`crate::names`] |
+//! | `18`, `d8` | clear the history and the chat log | `0x421d00`, `0x4220f0` |
 //!
 //! Everything else is ignored for now and reported once on stderr.
 
@@ -47,6 +51,7 @@ use vnr_core::{
 use crate::assets::Assets;
 use crate::backlog::{self, Action, Entry, History};
 use crate::ini::Settings;
+use crate::names::Names;
 use crate::pc::{self, Label, Line, Mail, PcView, Popup};
 use crate::prefs::{self, Preferences};
 use crate::save::{self, EngineState, SaveFile, SavedMode, SceneState, SlotSummary, Slots};
@@ -66,20 +71,15 @@ pub const CHANNELS: usize = 3;
 /// Fade speed when a picture change is shown without `sys 40`
 /// (240 ms).
 const IMPLICIT_FADE_STEP: u32 = 16;
+/// Variables of a playthrough: ids below this are cleared by `sys 11`
+/// (`0x401040`); higher ones keep system data.
+const GAME_VARIABLES_END: u16 = 0x4000;
 /// Script with the shared functions, loaded first.
 const LIBRARY: &str = "pmail";
 const STEP_BUDGET: usize = 200_000;
 const TEXT_SIZE: f32 = 22.0;
 const LINE_HEIGHT: f32 = 30.0;
 const BOX: (i32, i32, u32, u32) = (20, 424, 760, 166);
-
-/// Replaces engine placeholders with something readable. The real names
-/// come from the player's settings, which are not implemented yet.
-fn clean_text(text: &str) -> String {
-    text.replace("\\n", "\n")
-        .replace("$N0", "主人公")
-        .replace("$H0", "ＨＮ")
-}
 
 struct Fonts {
     mincho: Font,
@@ -240,6 +240,8 @@ pub struct Engine {
     load_requested: bool,
     /// Message history.
     history: History,
+    /// The hero's names (set at a new game by `sys 17`).
+    names: Names,
     prefs: Preferences,
     /// Fraction of a character of text still to reveal.
     reveal: f32,
@@ -374,7 +376,7 @@ impl Engine {
         let Some(line) = self.line_arg(vm, args) else {
             return Control::Continue;
         };
-        let voice = args.iter().find_map(|&v| voice_after(vm, v));
+        let voice = args.iter().find_map(|&v| voice_after(vm, &self.names, v));
         if let Some(voice) = &voice {
             let clip = self.assets.voice(voice);
             self.play(CHANNEL_VOICE, clip);
@@ -407,7 +409,7 @@ impl Engine {
         let text = args.get(1).and_then(|&v| vm.text(v))?;
         Some(Line {
             style,
-            text: clean_text(&text),
+            text: self.names.expand(&text),
         })
     }
 
@@ -419,23 +421,23 @@ impl Engine {
             if let Some(t) = vm.text(*value) {
                 text.push_str(&t);
             }
-            // The voice file is the pool entry right after the text.
-            voice = vm
-                .pool_text(value.script(), value.low().wrapping_add(1))
-                .filter(|v| !v.is_empty())
-                .or(voice);
+            // The voice files are the two pool entries after the text:
+            // plain, and one saying the hero's default name.
+            let entry =
+                |offset: u16| vm.pool_text(value.script(), value.low().wrapping_add(offset));
+            voice = self.names.pick_voice(entry(1), entry(2)).or(voice);
         }
         if let Some(voice) = &voice {
             let clip = self.assets.voice(voice);
             self.play(CHANNEL_VOICE, clip);
         }
-        let text = clean_text(&text);
+        let text = self.names.expand(&text);
         if text.trim().is_empty() {
             return Control::Continue;
         }
         self.present_if_changed();
         self.window_visible = true;
-        let speaker = clean_text(&self.speaker.1);
+        let speaker = self.names.expand(&self.speaker.1);
         self.history.push(Entry {
             speaker: (!speaker.is_empty()).then(|| speaker.clone()),
             text: text.clone(),
@@ -462,13 +464,18 @@ impl Engine {
 
 /// The voice file stored as the pool entry after a text argument, if
 /// that entry looks like one (`V…`, letters and digits).
-fn voice_after(vm: &Machine, value: Value) -> Option<String> {
+fn voice_after(vm: &Machine, names: &Names, value: Value) -> Option<String> {
     vm.text(value)?;
-    let next = vm.pool_text(value.script(), value.low().wrapping_add(1))?;
-    let looks_like_voice = next.len() >= 5
-        && next.starts_with(['V', 'v'])
-        && next.bytes().all(|b| b.is_ascii_alphanumeric());
-    looks_like_voice.then_some(next)
+    let entry = |offset: u16| {
+        vm.pool_text(value.script(), value.low().wrapping_add(offset))
+            .filter(|v| {
+                v.len() >= 5
+                    && v.starts_with(['V', 'v'])
+                    && v.bytes().all(|b| b.is_ascii_alphanumeric())
+            })
+    };
+    let plain = entry(1)?;
+    names.pick_voice(Some(plain), entry(2))
 }
 
 fn opt_ptr(sprite: &Option<Arc<Sprite>>) -> Option<*const Sprite> {
@@ -489,7 +496,8 @@ impl Host for Engine {
                 self.speaker = (style, text(1));
             }
             0x07 => {
-                let options: Vec<String> = vm.take_log().iter().map(|t| clean_text(t)).collect();
+                let options: Vec<String> =
+                    vm.take_log().iter().map(|t| self.names.expand(t)).collect();
                 let variable = args.iter().find_map(|&v| vm.variable_ref(v));
                 self.present_if_changed();
                 self.window_visible = true;
@@ -580,11 +588,12 @@ impl Host for Engine {
             // Backlog entry; the visible text of these lines is in the
             // pictures or the mail window.
             0x04 => {
-                let voice = text(2);
+                let voice = self.names.pick_voice(Some(text(2)), Some(text(3)));
+                let line = self.names.expand(&text(1));
                 self.history.push(Entry {
                     speaker: None,
-                    text: clean_text(&text(1)),
-                    voice: (!voice.is_empty()).then_some(voice),
+                    text: line,
+                    voice,
                 });
             }
             0x20 => {
@@ -621,7 +630,7 @@ impl Host for Engine {
             }
             0x34 => {
                 let label = Label {
-                    text: clean_text(&text(0)),
+                    text: self.names.expand(&text(0)),
                     rect: (
                         num(vm, self, 1),
                         num(vm, self, 2),
@@ -657,7 +666,8 @@ impl Host for Engine {
             0xB0 | 0xB2 => {
                 if let Some(line) = self.line_arg(vm, args) {
                     if number == 0xB0
-                        && let Some(voice) = args.iter().find_map(|&v| voice_after(vm, v))
+                        && let Some(voice) =
+                            args.iter().find_map(|&v| voice_after(vm, &self.names, v))
                     {
                         let clip = self.assets.voice(&voice);
                         self.play(CHANNEL_VOICE, clip);
@@ -696,7 +706,7 @@ impl Host for Engine {
                 self.letter.clear();
                 self.stage_pc(|pc| pc.letter = None);
             }
-            0xC2 => self.letter.push(clean_text(&text(1))),
+            0xC2 => self.letter.push(self.names.expand(&text(1))),
             0xC3 => {
                 let page = usize::try_from(num(vm, self, 0))
                     .ok()
@@ -719,9 +729,24 @@ impl Host for Engine {
                 return Control::Yield;
             }
             0x80 => {
-                let clip = self.assets.voice(&text(1));
-                self.play(CHANNEL_VOICE, clip);
+                if let Some(voice) = self.names.pick_voice(Some(text(1)), Some(text(2))) {
+                    let clip = self.assets.voice(&voice);
+                    self.play(CHANNEL_VOICE, clip);
+                }
             }
+            0x17 => self.names = self.prefs.names.clone(),
+            0x11 => vm.clear_variables(GAME_VARIABLES_END),
+            // Clear the history and the PC logs (title, extras).
+            0x18 | 0xD8 => {
+                self.history = History::default();
+                self.chat_log.clear();
+                self.mail_lines.clear();
+                self.letter.clear();
+                self.stage_pc(|pc| pc.chat = None);
+            }
+            // Restore points for the original's save; ours hold the whole
+            // state.
+            0x13 | 0x14 => {}
             0xD5 => {
                 let variable = args.iter().find_map(|&v| vm.variable_ref(v));
                 self.staged = Scene {
@@ -855,6 +880,7 @@ impl Game {
             music: None,
             load_requested: false,
             history: History::default(),
+            names: Names::default(),
             prefs: Preferences::default(),
             reveal: 0.0,
         };
@@ -887,7 +913,7 @@ impl Game {
         let Some(view) = self.settings.take() else {
             return;
         };
-        self.engine.prefs = view.prefs;
+        self.engine.prefs = view.prefs.clone();
         self.engine.apply_prefs();
         if let Some(path) = self.prefs_path()
             && let Err(e) = view.prefs.store(&path)
@@ -959,7 +985,7 @@ impl Game {
         Ok(SaveFile {
             version: save::VERSION,
             saved_at: save::now(),
-            chapter: clean_text(&e.chapter),
+            chapter: e.names.expand(&e.chapter),
             excerpt: save::excerpt(&excerpt, 40),
             scripts,
             machine,
@@ -983,6 +1009,7 @@ impl Game {
                 mail_lines: e.mail_lines.clone(),
                 letter: e.letter.clone(),
                 history: e.history.clone(),
+                names: e.names.clone(),
                 mode,
             },
         })
@@ -1064,6 +1091,7 @@ impl Game {
         e.mail_lines = state.mail_lines;
         e.letter = state.letter;
         e.history = state.history;
+        e.names = state.names;
         e.skipping = false;
         e.hidden = false;
         e.load_requested = false;
@@ -1263,7 +1291,7 @@ impl Game {
         if let Some(view) = &mut self.settings {
             let close = view.input(frame.input);
             // Hear the new volumes while adjusting them.
-            self.engine.prefs = view.prefs;
+            self.engine.prefs = view.prefs.clone();
             self.engine.apply_prefs();
             if close {
                 self.close_settings();
@@ -1271,7 +1299,7 @@ impl Game {
             return None;
         }
         if frame.input.contains(&InputEvent::KeyDown(Key::F(4))) {
-            self.settings = Some(prefs::View::new(self.engine.prefs));
+            self.settings = Some(prefs::View::new(self.engine.prefs.clone()));
             return None;
         }
         if let Some(view) = &mut self.backlog {
@@ -1432,7 +1460,7 @@ impl Game {
                 shadow: Some(Color::BLACK),
                 bold: false,
             };
-            let chapter = clean_text(&e.chapter);
+            let chapter = e.names.expand(&e.chapter);
             e.fonts
                 .get(FontFamily::Gothic)
                 .draw_line(canvas, 12.0, 8.0, &chapter, style);
@@ -1634,12 +1662,6 @@ impl App for Game {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cleans_placeholders() {
-        assert_eq!(clean_text("【$N0】"), "【主人公】");
-        assert_eq!(clean_text("a\\nb"), "a\nb");
-    }
 
     #[test]
     fn hover_wraps_around() {

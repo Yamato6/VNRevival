@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::backlog::History;
+use crate::names::Names;
 use crate::pc::{Line, PcView};
 use crate::vm::Snapshot;
 
@@ -54,6 +55,9 @@ pub struct EngineState {
     /// Message history (missing in older saves).
     #[serde(default)]
     pub history: History,
+    /// The hero's names (missing in older saves: the defaults).
+    #[serde(default)]
+    pub names: Names,
     pub mode: SavedMode,
 }
 
@@ -207,6 +211,7 @@ mod tests {
                 mail_lines: vec![],
                 letter: vec![],
                 history: History::default(),
+                names: Names::default(),
                 mode: SavedMode::Click,
             },
         }

@@ -229,6 +229,12 @@ impl Machine {
         used
     }
 
+    /// Sets the variables with ids below `end` to 0 (`sys 11` clears the
+    /// game's variables, below `0x4000`, before the title).
+    pub fn clear_variables(&mut self, end: u16) {
+        self.vars[..usize::from(end)].fill(0);
+    }
+
     /// Resumes from a snapshot. Every script it uses must be loaded.
     pub fn restore(&mut self, snapshot: &Snapshot) -> Result<(), String> {
         if let Some(missing) = Self::scripts_used(snapshot)

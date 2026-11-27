@@ -8,13 +8,15 @@ use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+use crate::names::Names;
 use vnr_core::{Canvas, Color, FULL_VOLUME, Font, InputEvent, Key, MouseButton, TextStyle};
 
 /// Highest level of every setting.
 pub const MAX: u8 = 10;
 
 /// The settings, each a level from 0 to [`MAX`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
     /// Text speed; [`MAX`] shows messages at once.
@@ -24,6 +26,9 @@ pub struct Preferences {
     pub voice: u8,
     /// Opacity of the message window.
     pub window: u8,
+    /// The hero's names for new games (VNRevival cannot type Japanese
+    /// in a dialog yet, so they are set here).
+    pub names: Names,
 }
 
 impl Default for Preferences {
@@ -34,6 +39,7 @@ impl Default for Preferences {
             sound: 8,
             voice: MAX,
             window: 6,
+            names: Names::default(),
         }
     }
 }
@@ -68,6 +74,16 @@ impl Preferences {
         }
         let json = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
         fs::write(path, json)
+    }
+
+    fn level(&self, row: usize) -> u8 {
+        match row {
+            0 => self.text_speed,
+            1 => self.music,
+            2 => self.sound,
+            3 => self.voice,
+            _ => self.window,
+        }
     }
 
     fn level_mut(&mut self, row: usize) -> &mut u8 {
@@ -190,8 +206,7 @@ impl View {
                 label,
                 style(18.0, Color::WHITE),
             );
-            let mut prefs = self.prefs;
-            let level = *prefs.level_mut(row);
+            let level = self.prefs.level(row);
             for step in 0..=MAX {
                 let x = BAR_LEFT + i32::from(step) * STEP - 5;
                 let color = if step <= level {
