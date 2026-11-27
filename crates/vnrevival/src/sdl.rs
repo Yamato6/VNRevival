@@ -1,4 +1,4 @@
-//! The SDL2 frontend: a window that shows the app's canvas scaled to fit
+//! The SDL2 frontend: a window that shows the interface scaled to fit
 //! (letterboxed, keeping the aspect ratio), an audio device fed by the
 //! mixer, and input translated to canvas coordinates.
 //!
@@ -15,6 +15,7 @@ use sdl2::pixels::PixelFormatEnum;
 use sdl2::video::FullscreenType;
 use vnr_core::app::Frame;
 use vnr_core::audio::SAMPLE_RATE;
+use vnr_core::shell::Shell;
 use vnr_core::{App, Canvas, FPS, Flow, InputEvent, Key, Mixer, MouseButton};
 
 /// Most logic frames run back to back when the window falls behind (for
@@ -103,7 +104,7 @@ fn translate(event: &Event) -> Option<InputEvent> {
 }
 
 /// Opens a window and runs `app` until it quits or the window is closed.
-pub fn run(app: &mut dyn App, mixer: &Mixer, scale: u32) -> Result<(), String> {
+pub fn run(app: &mut Shell, mixer: &Mixer, scale: u32) -> Result<(), String> {
     let sdl = sdl2::init()?;
     let video = sdl.video()?;
     let (width, height) = app.resolution();
@@ -170,6 +171,15 @@ pub fn run(app: &mut dyn App, mixer: &Mixer, scale: u32) -> Result<(), String> {
                 }
                 other => pending.extend(translate(&other)),
             }
+        }
+
+        if let Some(request) = app.take_window_request() {
+            let mode = if request.fullscreen {
+                FullscreenType::Desktop
+            } else {
+                FullscreenType::Off
+            };
+            screen.window_mut().set_fullscreen(mode)?;
         }
 
         let mut ran = 0;

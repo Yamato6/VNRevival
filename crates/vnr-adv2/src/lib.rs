@@ -10,8 +10,8 @@ pub mod backlog;
 pub mod game;
 pub mod ini;
 pub mod names;
+pub mod options;
 pub mod pc;
-pub mod prefs;
 pub mod save;
 pub mod system;
 pub mod transition;
@@ -20,7 +20,7 @@ pub mod vm;
 use std::path::Path;
 
 use overflow_adv2::Pack;
-use vnr_core::{App, Backend, BackendError, GameInfo, LaunchOptions, find_ci, resolve_ci};
+use vnr_core::{Backend, BackendError, GameInfo, LaunchOptions, Session, find_ci, resolve_ci};
 
 /// Packs the engine loads, in the order they are reported.
 pub const PACKS: [&str; 4] = ["SCRIPT.DAT", "GRAPHIC.DAT", "SOUND.DAT", "VOICE.DAT"];
@@ -83,18 +83,18 @@ impl Backend for Adv2 {
         }))
     }
 
-    fn launch(
+    fn open(
         &self,
         game: &GameInfo,
         options: &LaunchOptions,
-    ) -> Result<Box<dyn App>, BackendError> {
+    ) -> Result<Box<dyn Session>, BackendError> {
         let mut running = game::Game::new(
             &game.root,
             game.title.clone(),
             options.entry.as_deref(),
             options.font.clone(),
         )?;
-        running.set_save_dir(options.saves.clone().or_else(|| vnr_core::save_dir(game)));
+        running.set_data_dir(options.saves.clone().or_else(|| vnr_core::save_dir(game)));
         Ok(Box::new(running))
     }
 }

@@ -291,6 +291,42 @@ impl Canvas {
         }
     }
 
+    /// Draws `src` stretched (bilinear) onto the rectangle `(x, y, w, h)`
+    /// of this canvas, clipped to it.
+    pub fn draw_scaled(&mut self, src: &Canvas, x: i32, y: i32, w: u32, h: u32) {
+        let Some((dx, dy, ox, oy, cw, ch)) = self.clip(x, y, w, h) else {
+            return;
+        };
+        // Source position of each destination column/row, in 1/256 pixels,
+        // sampling at pixel centres.
+        let map = |dst: usize, dst_len: u32, src_len: u32| -> (usize, usize, u32) {
+            let pos = ((2 * dst as i64 + 1) * i64::from(src_len) * 256 / (2 * i64::from(dst_len))
+                - 128)
+                .clamp(0, (i64::from(src_len) - 1) * 256);
+            let i = (pos >> 8) as usize;
+            let next = (i + 1).min(src_len as usize - 1);
+            (i, next, (pos & 255) as u32)
+        };
+        let cols: Vec<_> = (0..cw).map(|c| map(ox + c, w, src.width)).collect();
+        let stride = self.width as usize * 4;
+        let sstride = src.width as usize * 4;
+        for r in 0..ch {
+            let (y0, y1, fy) = map(oy + r, h, src.height);
+            let row0 = &src.pixels[y0 * sstride..(y0 + 1) * sstride];
+            let row1 = &src.pixels[y1 * sstride..(y1 + 1) * sstride];
+            let d = (dy + r) * stride + dx * 4;
+            for (dp, &(x0, x1, fx)) in self.pixels[d..d + cw * 4].chunks_exact_mut(4).zip(&cols) {
+                for c in 0..3 {
+                    let top =
+                        u32::from(row0[x0 * 4 + c]) * (256 - fx) + u32::from(row0[x1 * 4 + c]) * fx;
+                    let bottom =
+                        u32::from(row1[x0 * 4 + c]) * (256 - fx) + u32::from(row1[x1 * 4 + c]) * fx;
+                    dp[c] = ((top * (256 - fy) + bottom * fy + (1 << 15)) >> 16) as u8;
+                }
+            }
+        }
+    }
+
     /// Writes the canvas as an RGB PNG.
     pub fn save_png(&self, path: &Path) -> std::io::Result<()> {
         let file = BufWriter::new(File::create(path)?);
@@ -349,6 +385,27 @@ mod tests {
         a.blend_from(&b, 128);
         assert_eq!(a.pixel(0, 0), Color::rgb(128, 128, 128));
         assert_eq!(a.pixel(1, 1), Color::WHITE);
+    }
+
+    #[test]
+    fn scales_with_interpolation() {
+        let mut src = Canvas::new(2, 1);
+        src.fill_rect(1, 0, 1, 1, Color::WHITE);
+        let mut dst = Canvas::new(6, 3);
+        dst.clear(Color::rgb(0, 0, 255));
+        dst.draw_scaled(&src, 1, 1, 4, 1);
+        // Edges keep the source colours, the middle is a mix.
+        assert_eq!(dst.pixel(1, 1), Color::BLACK);
+        assert_eq!(dst.pixel(4, 1), Color::WHITE);
+        let mid = dst.pixel(2, 1).r;
+        assert!((40..=100).contains(&mid), "{mid}");
+        // Outside the rectangle nothing changes.
+        assert_eq!(dst.pixel(0, 1), Color::rgb(0, 0, 255));
+        assert_eq!(dst.pixel(1, 0), Color::rgb(0, 0, 255));
+        // Same size is an exact copy.
+        let mut same = Canvas::new(2, 1);
+        same.draw_scaled(&src, 0, 0, 2, 1);
+        assert_eq!(same, src);
     }
 
     #[test]

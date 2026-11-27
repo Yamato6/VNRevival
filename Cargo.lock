@@ -628,8 +628,11 @@ dependencies = [
 name = "vnr-core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "fontdue",
  "png",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

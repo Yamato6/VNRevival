@@ -1,15 +1,11 @@
-//! Saved games.
+//! The game state in a save.
 //!
 //! A save is taken while the game waits for the player (a message, a
 //! choice or a click) and holds the script machine's state plus what the
 //! engine shows and plays, with pictures and scripts referred to by name.
-//! Each slot is a JSON file (`slot01.json` …) in the game's save folder.
+//! The interface stores it in its save slots (see `vnr_core::saves`).
 //!
 //! The original engine's own save files are not read or written.
-
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -18,8 +14,6 @@ use crate::names::Names;
 use crate::pc::{Line, PcView};
 use crate::vm::Snapshot;
 
-/// Slots offered in the menu.
-pub const SLOTS: usize = 10;
 /// Format version written to every save.
 pub const VERSION: u32 = 1;
 
@@ -27,12 +21,6 @@ pub const VERSION: u32 = 1;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SaveFile {
     pub version: u32,
-    /// Local time of the save, for the menu (`2026-11-26 14:03`).
-    pub saved_at: String,
-    /// Chapter title at the time.
-    pub chapter: String,
-    /// The text on screen, shortened, for the menu.
-    pub excerpt: String,
     /// Scripts the machine state needs, as `(id, name)`.
     pub scripts: Vec<(u16, String)>,
     pub machine: Snapshot,
@@ -86,97 +74,6 @@ pub enum SavedMode {
     Click,
 }
 
-/// What the menu shows for a used slot.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SlotSummary {
-    pub saved_at: String,
-    pub chapter: String,
-    pub excerpt: String,
-}
-
-/// The save slots of one game.
-#[derive(Debug, Clone)]
-pub struct Slots {
-    dir: PathBuf,
-}
-
-impl Slots {
-    pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
-    }
-
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
-    fn path(&self, slot: usize) -> PathBuf {
-        self.dir.join(format!("slot{:02}.json", slot + 1))
-    }
-
-    /// Writes a slot (through a temporary file, so a failed write leaves
-    /// the old save intact).
-    pub fn write(&self, slot: usize, save: &SaveFile) -> io::Result<()> {
-        fs::create_dir_all(&self.dir)?;
-        let json = serde_json::to_vec(save).map_err(io::Error::other)?;
-        let path = self.path(slot);
-        let temp = path.with_extension("json.tmp");
-        fs::write(&temp, json)?;
-        fs::rename(&temp, &path)
-    }
-
-    /// Reads a slot; `Ok(None)` if it is empty.
-    pub fn read(&self, slot: usize) -> io::Result<Option<SaveFile>> {
-        let data = match fs::read(self.path(slot)) {
-            Ok(data) => data,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        let save: SaveFile = serde_json::from_slice(&data).map_err(io::Error::other)?;
-        if save.version != VERSION {
-            return Err(io::Error::other(format!(
-                "save format {} is not supported (expected {VERSION})",
-                save.version
-            )));
-        }
-        Ok(Some(save))
-    }
-
-    /// Summaries of every slot; unreadable slots show their error.
-    pub fn summaries(&self) -> Vec<Option<SlotSummary>> {
-        (0..SLOTS)
-            .map(|slot| match self.read(slot) {
-                Ok(save) => save.map(|s| SlotSummary {
-                    saved_at: s.saved_at,
-                    chapter: s.chapter,
-                    excerpt: s.excerpt,
-                }),
-                Err(e) => Some(SlotSummary {
-                    saved_at: String::new(),
-                    chapter: String::new(),
-                    excerpt: format!("(unreadable: {e})"),
-                }),
-            })
-            .collect()
-    }
-}
-
-/// The first `max` characters of `text` on one line, with `…` if cut.
-pub fn excerpt(text: &str, max: usize) -> String {
-    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= max {
-        flat
-    } else {
-        let mut cut: String = flat.chars().take(max).collect();
-        cut.push('…');
-        cut
-    }
-}
-
-/// The current local time as `YYYY-MM-DD HH:MM`.
-pub fn now() -> String {
-    chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,9 +81,6 @@ mod tests {
     fn sample() -> SaveFile {
         SaveFile {
             version: VERSION,
-            saved_at: "2026-11-26 14:03".into(),
-            chapter: "プロローグ".into(),
-            excerpt: "こんばんわ".into(),
             scripts: vec![(490, "PRO1".into())],
             machine: Snapshot {
                 current: 490,
@@ -218,25 +112,11 @@ mod tests {
     }
 
     #[test]
-    fn slots_round_trip() {
-        let dir = std::env::temp_dir().join(format!("vnr-saves-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        let slots = Slots::new(dir.clone());
-        assert!(slots.read(0).unwrap().is_none());
-        slots.write(3, &sample()).unwrap();
-        let back = slots.read(3).unwrap().unwrap();
+    fn round_trips_through_json() {
+        let json = serde_json::to_value(sample()).unwrap();
+        let back: SaveFile = serde_json::from_value(json).unwrap();
         assert_eq!(back.machine, sample().machine);
         assert_eq!(back.engine.chat_log, sample().engine.chat_log);
-        let summaries = slots.summaries();
-        assert_eq!(summaries.len(), SLOTS);
-        assert_eq!(summaries[3].as_ref().unwrap().chapter, "プロローグ");
-        assert!(summaries[0].is_none());
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn excerpts_are_short_and_flat() {
-        assert_eq!(excerpt("あいう\nえお", 10), "あいう えお");
-        assert_eq!(excerpt("あいうえお", 3), "あいう…");
+        assert_eq!(back.engine.mode, SavedMode::Click);
     }
 }

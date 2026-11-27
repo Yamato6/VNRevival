@@ -1,9 +1,14 @@
 //! Engine-independent core of VNRevival.
 //!
 //! Every original engine (OverflowADV2, …) is supported by a *backend*: a
-//! crate that implements [`Backend`] and turns that engine's data into
-//! what the shared runtime needs: an [`App`] that draws on a [`Canvas`],
-//! plays [`Clip`]s through the [`Mixer`] and reacts to [`InputEvent`]s.
+//! crate that implements [`Backend`] and turns that engine's data into a
+//! [`Session`]: the game itself, drawing on a [`Canvas`], playing
+//! [`Clip`]s through the [`Mixer`] and reacting to [`InputEvent`]s.
+//!
+//! Everything around the game is shared by all of them: the
+//! [`Shell`](shell::Shell) is the universal interface (main menu, saves,
+//! history, settings) that wraps a session into the [`App`] the
+//! frontends run.
 //!
 //! The runtime pieces here know nothing about windows or audio devices;
 //! the `vnrevival` binary drives them with SDL2, and [`run_headless`]
@@ -12,11 +17,19 @@
 pub mod app;
 pub mod audio;
 pub mod gfx;
+pub mod lang;
+pub mod saves;
+pub mod session;
+pub mod settings;
+pub mod shell;
 pub mod text;
+pub mod ui;
 
 pub use app::{App, FPS, Flow, Frame, InputEvent, Key, MouseButton, run_headless};
 pub use audio::{Clip, FULL_VOLUME, Mixer};
 pub use gfx::{Canvas, Color, Sprite};
+pub use session::{HistoryEntry, SaveData, Session, SessionEvent, Start};
+pub use settings::Settings;
 pub use text::{Font, FontFamily, TextStyle};
 
 use std::error::Error;
@@ -53,12 +66,13 @@ pub trait Backend {
     /// error when it is but its data cannot be read.
     fn detect(&self, dir: &Path) -> Result<Option<GameInfo>, BackendError>;
 
-    /// Starts a game previously found by [`Backend::detect`].
-    fn launch(
+    /// Opens a game previously found by [`Backend::detect`]. The
+    /// session starts when the interface calls [`Session::start`].
+    fn open(
         &self,
         game: &GameInfo,
         options: &LaunchOptions,
-    ) -> Result<Box<dyn App>, BackendError>;
+    ) -> Result<Box<dyn Session>, BackendError>;
 }
 
 /// Settings that apply to every engine.
@@ -69,8 +83,8 @@ pub struct LaunchOptions {
     pub entry: Option<String>,
     /// Font file to use instead of the installed system fonts.
     pub font: Option<PathBuf>,
-    /// Folder for saved games instead of the default one (see
-    /// [`save_dir`]).
+    /// Folder for saved games and the game's own data instead of the
+    /// default one (see [`save_dir`]).
     pub saves: Option<PathBuf>,
 }
 

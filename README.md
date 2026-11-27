@@ -18,8 +18,8 @@ VNRevival ships **no game data**.
 ```
 VNTools-rs (format crates)      VNRevival
 ┌──────────────────────┐        ┌───────────────────────────────────────┐
-│ overflow-adv2        │──────▶ │ vnr-adv2   backend: engine → runtime   │
-│   packs, LZSS, ...   │        │ vnr-core   shared runtime & Backend    │
+│ overflow-adv2        │──────▶ │ vnr-adv2   backend: engine → Session   │
+│   packs, LZSS, ...   │        │ vnr-core   runtime, interface, Backend │
 └──────────────────────┘        │ vnrevival  the executable              │
                                 └───────────────────────────────────────┘
 ```
@@ -27,19 +27,22 @@ VNTools-rs (format crates)      VNRevival
 * **[VNTools-rs](https://github.com/Yamato6/VNTools-rs)** holds the
   readers for each engine's file formats, plus extraction tools and the
   reverse-engineering notes. Formats are figured out there first.
-* **`vnr-core`** is engine-independent: the [`Backend`] interface and the
-  shared runtime: a software compositor (`Canvas`, `Sprite`), a mixer for
-  44.1 kHz stereo clips with loops, Japanese text with system fonts, input
-  events, and the `App` trait a game implements. It knows nothing about
-  windows or devices, so it runs headless in tests.
-* **`vnrevival`** is the executable. It drives an `App` with SDL2 (window,
-  scaling, vsync, audio, input) or without any device for screenshots.
+* **`vnr-core`** is engine-independent: the [`Backend`] interface, the
+  shared runtime (a software compositor, a mixer for 44.1 kHz stereo
+  clips with loops, Japanese text with system fonts, input events) and
+  the **universal interface**, `Shell`: the main menu, pause menu, save
+  slots, message history and settings, the same for every game. A game
+  is a `Session` that only plays itself; the shell shows its screen
+  scaled inside a 1280 × 720 interface. Nothing here knows about windows
+  or devices, so it runs headless in tests.
+* **`vnrevival`** is the executable. It drives the shell with SDL2
+  (window, scaling, vsync, audio, input) or without any device for
+  screenshots.
 * **`vnr-<engine>`** crates are backends: they use the format crates to
-  turn an original engine's scripts and assets into what the runtime
-  needs.
+  turn an original engine's scripts and assets into a `Session`.
 
 Adding a new engine means adding its format crate to VNTools-rs and a
-backend crate here; the runtime stays the same.
+backend crate here; the runtime and the interface stay the same.
 
 [`Backend`]: crates/vnr-core/src/lib.rs
 
@@ -57,19 +60,24 @@ cargo run --release -- run "<game dir>"    # play
 |---|---|
 | `--script NAME` | start from another script instead of the normal entry point |
 | `--font FILE` | font to use instead of the system's Japanese fonts |
-| `--scale N` | initial window size, 1–4 times the game resolution |
+| `--scale N` | initial window size, 1–3 times 1280 × 720 |
+| `--new-game` | skip VNRevival's menu and start a new game |
 | `--saves DIR` | folder for saved games instead of the default one |
 | `--frames N` | run without a window for N frames (60 per second) |
 | `--screenshot FILE` | with `--frames`: save the last frame as PNG |
 | `--click-every N` | with `--frames`: click every N frames |
-| `--click-at X,Y` | where those clicks land (default `0,0`) |
+| `--click-at X,Y` | where those clicks land, in 1280 × 720 interface pixels (default `0,0`) |
 
-In the window: click, Enter or Space advance the text, right-click hides
-the message window, Ctrl skips, the wheel up or Page Up opens the message
-history (click a ♪ line to hear its voice again), F2 saves, F3 loads, F4
-opens the settings, Escape quits (or closes the open screen), Alt+Enter
-toggles full screen. The window can be resized; the picture keeps its
-aspect ratio.
+A game opens on VNRevival's main menu (new game, load, settings, quit);
+the settings can switch to the game's own title screen instead.
+
+In a game: click, Enter or Space advance the text, Ctrl skips, the middle
+button hides the message window. Escape or right-click open the pause
+menu (save, load, history, settings, main menu, quit). Shortcuts: F2
+saves, F3 loads, F4 opens the settings, the wheel up or Page Up opens the
+message history (click a marked line to hear its voice again). Escape or
+right-click close any screen; Alt+Enter toggles full screen. The window
+can be resized; the picture keeps its aspect ratio.
 
 **Pure Mail today:** the game boots like the original (`pmail.obj` +
 `start.obj`) and runs its compiled scripts on a reimplementation of the
@@ -81,7 +89,9 @@ voices, choices, backgrounds, character sprites, colour fills,
 transitions with the original timings (cross-fade and the "morning light"
 wipe), waits, music, sound effects and voices, and the in-game PC:
 the chat client, the mailer, letters, text labels, the taskbar clock and
-pop-up animations; saving and loading, the message history and settings.
+pop-up animations. "New game" in VNRevival's menu runs the game's
+start-up unseen and answers its title; with the original title screen,
+its load button opens VNRevival's load screen.
 Still missing: several effects; engine functions that are not implemented are skipped and
 reported once on the console. The PC's layout comes from the game's own
 window graphics and the engine's handlers, but fonts and colours inside
@@ -90,8 +100,8 @@ the windows are approximations.
 ### Saved games
 
 There are 10 slots per game. You can save whenever the game waits for
-you (a message, a choice, a chat line or an open mail); the title menu's
-load button opens the same menu. Saves are JSON files in
+you (a message, a choice, a chat line or an open mail). Saves are JSON
+files in
 `%APPDATA%\VNRevival\saves\<game>` on Windows,
 `~/Library/Application Support/VNRevival/saves/<game>` on macOS and
 `~/.local/share/vnrevival/saves/<game>` elsewhere (or under `--saves`).
@@ -100,9 +110,20 @@ not read.
 
 ### Settings
 
-F4 sets the text speed, the music, sound effect and voice volumes and the
-opacity of the message window. They are kept per game in `settings.json`
-in the same folder as the saves.
+The settings screen (F4) has three tabs: **System** (interface language:
+English, Spanish or Japanese; what to show at start; full screen; unlock
+all extras), **Sound** (master, music, sound effect and voice volumes)
+and **Text** (text speed, message window opacity). They apply to every
+game and are kept in `settings.json` in the user data folder
+(`%APPDATA%\VNRevival` on Windows, `~/Library/Application
+Support/VNRevival` on macOS, `~/.local/share/vnrevival` elsewhere).
+
+Each interface language can be changed or completed with a
+`lang/<code>.json` file in that folder (`en`, `es`, `ja`) holding
+`{"key": "text"}` pairs; the keys are listed in `crates/vnr-core/src/lang.rs`.
+
+Options that belong to one game are kept with its saves: for Pure Mail,
+the hero's names in `options.json`.
 
 ### Fonts
 
@@ -155,10 +176,13 @@ overflow-adv2 = { path = "../VNTools-rs/overflow-adv2" }
    audio mixing, headless runs with screenshots.
 3. Pure Mail playable. Done: script interpreter (variables, expressions,
    `pmail.obj` functions, the engine's `sys` calls), choices, the in-game
-   PC, save/load, message history, settings. To do: the remaining engine
-   functions and effects.
-4. Video (Indeo 5 movies), mods and translations.
-5. More engines.
+   PC. To do: the remaining engine functions and effects.
+4. Universal interface. Done: main menu, pause menu, save slots, history,
+   settings, interface languages. To do: CG gallery, music room, scene
+   replay, a game library with a folder picker, text input for names,
+   a user manual.
+5. Video (Indeo 5 movies), mods and translations.
+6. More engines.
 
 ## License
 
