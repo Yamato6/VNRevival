@@ -6,9 +6,11 @@
 //! engine functions implemented in [`game`].
 
 pub mod assets;
+pub mod backlog;
 pub mod game;
 pub mod ini;
 pub mod pc;
+pub mod prefs;
 pub mod save;
 pub mod vm;
 

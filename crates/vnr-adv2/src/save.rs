@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::backlog::History;
 use crate::pc::{Line, PcView};
 use crate::vm::Snapshot;
 
@@ -50,6 +51,9 @@ pub struct EngineState {
     pub chat_log: Vec<Line>,
     pub mail_lines: Vec<Line>,
     pub letter: Vec<String>,
+    /// Message history (missing in older saves).
+    #[serde(default)]
+    pub history: History,
     pub mode: SavedMode,
 }
 
@@ -202,6 +206,7 @@ mod tests {
                 }],
                 mail_lines: vec![],
                 letter: vec![],
+                history: History::default(),
                 mode: SavedMode::Click,
             },
         }

@@ -65,9 +65,26 @@ cargo run --release -- run "<game dir>"    # play
 | `--click-at X,Y` | where those clicks land (default `0,0`) |
 
 In the window: click, Enter or Space advance the text, right-click hides
-the message window, Ctrl skips, F2 saves, F3 loads, Escape quits (or
-closes the save menu), Alt+Enter toggles full screen. The window can be
-resized; the picture keeps its aspect ratio.
+the message window, Ctrl skips, the wheel up or Page Up opens the message
+history (click a ♪ line to hear its voice again), F2 saves, F3 loads, F4
+opens the settings, Escape quits (or closes the open screen), Alt+Enter
+toggles full screen. The window can be resized; the picture keeps its
+aspect ratio.
+
+**Pure Mail today:** the game boots like the original (`pmail.obj` +
+`start.obj`) and runs its compiled scripts on a reimplementation of the
+engine's script machine: variables, expressions, calls into the shared
+functions of `pmail.obj`, branches and script changes all work (an
+automated walk covers the whole game without a machine error). Implemented
+on the engine side: the title menu, messages with speaker colours and
+voices, choices, backgrounds, character sprites, colour fills,
+cross-fades, waits, music, sound effects and voices, and the in-game PC:
+the chat client, the mailer, letters, text labels, the taskbar clock and
+pop-up animations; saving and loading, the message history and settings.
+Still missing: several effects; engine functions that are not implemented are skipped and
+reported once on the console. The PC's layout comes from the game's own
+window graphics and the engine's handlers, but fonts and colours inside
+the windows are approximations.
 
 ### Saved games
 
@@ -80,20 +97,11 @@ load button opens the same menu. Saves are JSON files in
 They are VNRevival's own format: saves made with the original game are
 not read.
 
-**Pure Mail today:** the game boots like the original (`pmail.obj` +
-`start.obj`) and runs its compiled scripts on a reimplementation of the
-engine's script machine: variables, expressions, calls into the shared
-functions of `pmail.obj`, branches and script changes all work (an
-automated walk covers the whole game without a machine error). Implemented
-on the engine side: the title menu, messages with speaker colours and
-voices, choices, backgrounds, character sprites, colour fills,
-cross-fades, waits, music, sound effects and voices, and the in-game PC:
-the chat client, the mailer, letters, text labels, the taskbar clock and
-pop-up animations; saving and loading. Still missing: the backlog, settings and
-several effects; engine functions that are not implemented are skipped and
-reported once on the console. The PC's layout comes from the game's own
-window graphics and the engine's handlers, but fonts and colours inside
-the windows are approximations.
+### Settings
+
+F4 sets the text speed, the music, sound effect and voice volumes and the
+opacity of the message window. They are kept per game in `settings.json`
+in the same folder as the saves.
 
 ### Fonts
 
@@ -146,7 +154,8 @@ overflow-adv2 = { path = "../VNTools-rs/overflow-adv2" }
    audio mixing, headless runs with screenshots.
 3. Pure Mail playable. Done: script interpreter (variables, expressions,
    `pmail.obj` functions, the engine's `sys` calls), choices, the in-game
-   PC, save/load. To do: backlog, settings.
+   PC, save/load, message history, settings. To do: the remaining engine
+   functions and effects.
 4. Video (Indeo 5 movies), mods and translations.
 5. More engines.
 

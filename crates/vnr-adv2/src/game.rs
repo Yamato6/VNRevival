@@ -26,7 +26,7 @@
 //! | `80` | voice | data (`usr 113`) |
 //! | `d5` | title menu; 1-based choice into the variable | `start.obj` |
 //! | `e1` | load menu (title); closing it without loading resumes the script | `start.obj` |
-//! | `04` | backlog entry (ignored; the text is in pictures or windows) | handler `0x422d80` |
+//! | `04` | history entry only (the text is in pictures or windows) | handler `0x422d80` |
 //! | `20` | wait for a click | data (always before `83`) |
 //! | `63`, `83` | stop the sound effect, the voice | `0x426e00`, `0x424590` |
 //! | `65`, `85` | wait until the sound effect, the voice ends | `0x424000`, `0x4245c0` |
@@ -40,13 +40,15 @@ use std::sync::Arc;
 
 use vnr_core::text::find_system_font;
 use vnr_core::{
-    App, BackendError, Canvas, Color, FULL_VOLUME, Flow, Font, FontFamily, Frame, InputEvent, Key,
-    Mixer, MouseButton, Sprite, TextStyle,
+    App, BackendError, Canvas, Color, Flow, Font, FontFamily, Frame, InputEvent, Key, Mixer,
+    MouseButton, Sprite, TextStyle,
 };
 
 use crate::assets::Assets;
+use crate::backlog::{self, Action, Entry, History};
 use crate::ini::Settings;
 use crate::pc::{self, Label, Line, Mail, PcView, Popup};
+use crate::prefs::{self, Preferences};
 use crate::save::{self, EngineState, SaveFile, SavedMode, SceneState, SlotSummary, Slots};
 use crate::vm::{Control, Host, Machine, Status, Value};
 
@@ -63,7 +65,6 @@ pub const CHANNELS: usize = 3;
 const FADE_FRAMES: u64 = 15;
 /// Script with the shared functions, loaded first.
 const LIBRARY: &str = "pmail";
-const CHARS_PER_FRAME: usize = 1;
 const STEP_BUDGET: usize = 200_000;
 const TEXT_SIZE: f32 = 22.0;
 const LINE_HEIGHT: f32 = 30.0;
@@ -227,12 +228,48 @@ pub struct Engine {
     music: Option<i32>,
     /// The script asked for the load menu (`sys e1`).
     load_requested: bool,
+    /// Message history.
+    history: History,
+    prefs: Preferences,
+    /// Fraction of a character of text still to reveal.
+    reveal: f32,
 }
 
 impl Engine {
     fn play(&self, channel: usize, clip: Option<Arc<vnr_core::Clip>>) {
         if let (Some(mixer), Some(clip)) = (&self.mixer, clip) {
-            mixer.play(channel, clip, FULL_VOLUME);
+            mixer.play(channel, clip, self.channel_volume(channel));
+        }
+    }
+
+    /// Mixer volume of a channel from the settings.
+    fn channel_volume(&self, channel: usize) -> u16 {
+        Preferences::volume(match channel {
+            CHANNEL_MUSIC => self.prefs.music,
+            CHANNEL_SOUND => self.prefs.sound,
+            _ => self.prefs.voice,
+        })
+    }
+
+    /// Applies changed settings to what is playing.
+    fn apply_prefs(&self) {
+        if let Some(mixer) = &self.mixer {
+            for channel in [CHANNEL_MUSIC, CHANNEL_SOUND, CHANNEL_VOICE] {
+                mixer.set_volume(channel, self.channel_volume(channel));
+            }
+        }
+    }
+
+    /// Characters to reveal this frame (everything when text is instant).
+    fn reveal_step(&mut self) -> usize {
+        match self.prefs.chars_per_second() {
+            Some(cps) => {
+                self.reveal += cps / vnr_core::FPS as f32;
+                let n = self.reveal.floor();
+                self.reveal -= n;
+                n as usize
+            }
+            None => usize::MAX / 2,
         }
     }
 
@@ -304,10 +341,16 @@ impl Engine {
         let Some(line) = self.line_arg(vm, args) else {
             return Control::Continue;
         };
-        if let Some(voice) = args.iter().find_map(|&v| voice_after(vm, v)) {
-            let clip = self.assets.voice(&voice);
+        let voice = args.iter().find_map(|&v| voice_after(vm, v));
+        if let Some(voice) = &voice {
+            let clip = self.assets.voice(voice);
             self.play(CHANNEL_VOICE, clip);
         }
+        self.history.push(Entry {
+            speaker: None,
+            text: line.text.clone(),
+            voice,
+        });
         self.chat_log.push(line);
         let tail = self.chat_tail();
         self.stage_pc(|pc| pc.chat = Some(tail));
@@ -349,8 +392,8 @@ impl Engine {
                 .filter(|v| !v.is_empty())
                 .or(voice);
         }
-        if let Some(voice) = voice {
-            let clip = self.assets.voice(&voice);
+        if let Some(voice) = &voice {
+            let clip = self.assets.voice(voice);
             self.play(CHANNEL_VOICE, clip);
         }
         let text = clean_text(&text);
@@ -360,6 +403,11 @@ impl Engine {
         self.present_if_changed();
         self.window_visible = true;
         let speaker = clean_text(&self.speaker.1);
+        self.history.push(Entry {
+            speaker: (!speaker.is_empty()).then(|| speaker.clone()),
+            text: text.clone(),
+            voice,
+        });
         self.mode = Mode::Message {
             text,
             speaker: (!speaker.is_empty()).then_some(speaker),
@@ -479,7 +527,14 @@ impl Host for Engine {
             }
             // Backlog entry; the visible text of these lines is in the
             // pictures or the mail window.
-            0x04 => {}
+            0x04 => {
+                let voice = text(2);
+                self.history.push(Entry {
+                    speaker: None,
+                    text: clean_text(&text(1)),
+                    voice: (!voice.is_empty()).then_some(voice),
+                });
+            }
             0x20 => {
                 if !self.skipping {
                     self.present_if_changed();
@@ -675,6 +730,10 @@ pub struct Game {
     /// Where saves go; `None` disables saving.
     slots: Option<Slots>,
     menu: Option<Menu>,
+    /// The message history, while open.
+    backlog: Option<backlog::View>,
+    /// The settings screen, while open.
+    settings: Option<prefs::View>,
 }
 
 /// The save or load menu.
@@ -738,6 +797,9 @@ impl Game {
             script_names,
             music: None,
             load_requested: false,
+            history: History::default(),
+            prefs: Preferences::default(),
+            reveal: 0.0,
         };
         Ok(Self {
             title,
@@ -745,12 +807,36 @@ impl Game {
             engine,
             slots: None,
             menu: None,
+            backlog: None,
+            settings: None,
         })
     }
 
     /// Sets the folder for saved games; `None` disables saving.
     pub fn set_save_dir(&mut self, dir: Option<PathBuf>) {
         self.slots = dir.map(Slots::new);
+        if let Some(path) = self.prefs_path() {
+            self.engine.prefs = Preferences::load(&path);
+            self.engine.apply_prefs();
+        }
+    }
+
+    /// `settings.json` in the save folder.
+    fn prefs_path(&self) -> Option<PathBuf> {
+        self.slots.as_ref().map(|s| s.dir().join("settings.json"))
+    }
+
+    fn close_settings(&mut self) {
+        let Some(view) = self.settings.take() else {
+            return;
+        };
+        self.engine.prefs = view.prefs;
+        self.engine.apply_prefs();
+        if let Some(path) = self.prefs_path()
+            && let Err(e) = view.prefs.store(&path)
+        {
+            eprintln!("could not save settings to {}: {e}", path.display());
+        }
     }
 
     /// Whether the game is at a point where it can be saved.
@@ -839,6 +925,7 @@ impl Game {
                 chat_log: e.chat_log.clone(),
                 mail_lines: e.mail_lines.clone(),
                 letter: e.letter.clone(),
+                history: e.history.clone(),
                 mode,
             },
         })
@@ -920,6 +1007,7 @@ impl Game {
         e.chat_log = state.chat_log;
         e.mail_lines = state.mail_lines;
         e.letter = state.letter;
+        e.history = state.history;
         e.skipping = false;
         e.hidden = false;
         e.load_requested = false;
@@ -1116,6 +1204,42 @@ impl Game {
             self.menu_input(frame);
             return None;
         }
+        if let Some(view) = &mut self.settings {
+            let close = view.input(frame.input);
+            // Hear the new volumes while adjusting them.
+            self.engine.prefs = view.prefs;
+            self.engine.apply_prefs();
+            if close {
+                self.close_settings();
+            }
+            return None;
+        }
+        if frame.input.contains(&InputEvent::KeyDown(Key::F(4))) {
+            self.settings = Some(prefs::View::new(self.engine.prefs));
+            return None;
+        }
+        if let Some(view) = &mut self.backlog {
+            match view.input(frame.input) {
+                Action::None => {}
+                Action::Close => self.backlog = None,
+                Action::Voice(voice) => {
+                    let clip = self.engine.assets.voice(&voice);
+                    self.engine.play(CHANNEL_VOICE, clip);
+                }
+            }
+            return None;
+        }
+        let wants_history = frame.input.iter().any(|event| {
+            matches!(
+                event,
+                InputEvent::Wheel(1..) | InputEvent::KeyDown(Key::PageUp)
+            )
+        });
+        if wants_history && self.can_save() && !self.engine.history.is_empty() {
+            let font = self.engine.fonts.get(FontFamily::Gothic);
+            self.backlog = Some(backlog::View::new(&self.engine.history, font));
+            return None;
+        }
         let open = frame.input.iter().find_map(|event| match event {
             InputEvent::KeyDown(Key::F(2)) => Some(true),
             InputEvent::KeyDown(Key::F(3)) => Some(false),
@@ -1161,12 +1285,13 @@ impl Game {
             }
         }
         let skip = e.skipping;
+        let step = e.reveal_step();
         let mut answer: Option<(Option<u16>, i32)> = None;
         match &mut e.mode {
             Mode::Message { text, shown, .. } => {
                 let total = text.chars().count();
                 if *shown < total && !(advance || skip) {
-                    *shown += CHARS_PER_FRAME;
+                    *shown = (*shown + step).min(total);
                 } else if *shown < total {
                     *shown = total;
                     if skip {
@@ -1259,7 +1384,15 @@ impl Game {
                 style,
                 shown,
             } => {
-                canvas.fill_rect(x, y, w, h, e.settings.message_window().with_opacity(150));
+                canvas.fill_rect(
+                    x,
+                    y,
+                    w,
+                    h,
+                    e.settings
+                        .message_window()
+                        .with_opacity(e.prefs.window_alpha()),
+                );
                 let cs = e.settings.char_style(*style);
                 let ts = TextStyle {
                     size: TEXT_SIZE,
@@ -1285,7 +1418,15 @@ impl Game {
                 }
             }
             Mode::Choice { options, hover, .. } => {
-                canvas.fill_rect(x, y, w, h, e.settings.message_window().with_opacity(150));
+                canvas.fill_rect(
+                    x,
+                    y,
+                    w,
+                    h,
+                    e.settings
+                        .message_window()
+                        .with_opacity(e.prefs.window_alpha()),
+                );
                 let cs = e.settings.char_style(0);
                 for (i, option) in options.iter().enumerate() {
                     let rect = choice_rect(i);
@@ -1417,6 +1558,12 @@ impl App for Game {
         self.draw_title(frame.canvas);
         self.draw_text_box(frame.canvas);
         self.draw_end(frame.canvas);
+        if let Some(view) = &mut self.backlog {
+            view.draw(frame.canvas, self.engine.fonts.get(FontFamily::Gothic));
+        }
+        if let Some(view) = &self.settings {
+            view.draw(frame.canvas, self.engine.fonts.get(FontFamily::Gothic));
+        }
         self.draw_menu(frame.canvas);
         Flow::Continue
     }
@@ -1565,6 +1712,84 @@ mod tests {
         vnr_core::run_headless(&mut booted, &mixer, 1, &pick);
         assert!(booted.menu.is_none());
         assert_eq!(booted.vm.snapshot(), machine);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The wheel opens the history over the first chat and closes it
+    /// again (needs `ADV2_GAME_DIR`).
+    #[test]
+    fn shows_the_history() {
+        let chatting = |e: &Engine| {
+            e.mode == Mode::Click && e.shown.pc.chat.as_ref().is_some_and(|c| c.len() >= 10)
+        };
+        let Some(mut game) = play_prologue_until("history-before", 40_000, chatting) else {
+            eprintln!("ADV2_GAME_DIR not set or no font, skipping");
+            return;
+        };
+        let history: Vec<Entry> = game.engine.history.entries().cloned().collect();
+        assert!(history.iter().any(|e| e.speaker.is_some()));
+        assert!(history.iter().any(|e| e.text.starts_with("ＥＶＥ：")));
+        let mixer = Mixer::new(CHANNELS);
+        let canvas = vnr_core::run_headless(&mut game, &mixer, 2, &[(0, InputEvent::Wheel(1))]);
+        assert!(game.backlog.is_some());
+        if let Some(out) = std::env::var_os("VNR_SHOT_DIR") {
+            canvas
+                .save_png(&Path::new(&out).join("history.png"))
+                .unwrap();
+        }
+        // Scroll up, then back down past the end.
+        let events = [
+            (0, InputEvent::Wheel(2)),
+            (1, InputEvent::Wheel(-2)),
+            (2, InputEvent::Wheel(-1)),
+        ];
+        vnr_core::run_headless(&mut game, &mixer, 3, &events);
+        assert!(game.backlog.is_none());
+        assert_eq!(game.engine.mode, Mode::Click);
+    }
+
+    /// F4 opens the settings; they are stored when closed and read again
+    /// by the next launch (needs `ADV2_GAME_DIR`).
+    #[test]
+    fn settings_persist() {
+        let Some(root) = std::env::var_os("ADV2_GAME_DIR") else {
+            eprintln!("ADV2_GAME_DIR not set, skipping");
+            return;
+        };
+        let boot = || match Game::new(Path::new(&root), "Pure Mail".into(), None, None) {
+            Ok(g) => Some(g),
+            Err(e) if e.to_string().contains("no Japanese font") => None,
+            Err(e) => panic!("{e}"),
+        };
+        let Some(mut game) = boot() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("vnr-adv2-prefs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        game.set_save_dir(Some(dir.clone()));
+        let mixer = Mixer::new(CHANNELS);
+        let key = |k| InputEvent::KeyDown(k);
+        let events = [
+            (10, key(Key::F(4))),
+            (11, key(Key::Down)),
+            (12, key(Key::Left)),
+            (13, key(Key::Left)),
+        ];
+        let canvas = vnr_core::run_headless(&mut game, &mixer, 14, &events);
+        assert!(game.settings.is_some());
+        if let Some(out) = std::env::var_os("VNR_SHOT_DIR") {
+            canvas
+                .save_png(&Path::new(&out).join("settings.png"))
+                .unwrap();
+        }
+        vnr_core::run_headless(&mut game, &mixer, 1, &[(0, key(Key::Escape))]);
+        assert!(game.settings.is_none());
+        let music = Preferences::default().music - 2;
+        assert_eq!(game.engine.prefs.music, music);
+
+        let mut again = boot().unwrap();
+        again.set_save_dir(Some(dir.clone()));
+        assert_eq!(again.engine.prefs.music, music);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
