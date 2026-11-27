@@ -13,6 +13,7 @@ pub mod names;
 pub mod pc;
 pub mod prefs;
 pub mod save;
+pub mod system;
 pub mod transition;
 pub mod vm;
 

@@ -35,6 +35,7 @@
 //! | `13`, `14` | restore points of the original's save (nothing to do) | `0x425730`, `0x425de0` |
 //! | `17` | new game: take the hero's names from the settings (the original asks in a dialog) | `0x421d20`; see [`crate::names`] |
 //! | `18`, `d8` | clear the history and the chat log | `0x421d00`, `0x4220f0` |
+//! | `d7` | unlock a scene of the replay list | `0x421f50`; see [`crate::system`] |
 //!
 //! Everything else is ignored for now and reported once on stderr.
 
@@ -55,6 +56,7 @@ use crate::names::Names;
 use crate::pc::{self, Label, Line, Mail, PcView, Popup};
 use crate::prefs::{self, Preferences};
 use crate::save::{self, EngineState, SaveFile, SavedMode, SceneState, SlotSummary, Slots};
+use crate::system::SystemData;
 use crate::transition::{self, Effect, MorningPictures, Transition};
 use crate::vm::{Control, Host, Machine, Status, Value};
 
@@ -242,6 +244,8 @@ pub struct Engine {
     history: History,
     /// The hero's names (set at a new game by `sys 17`).
     names: Names,
+    /// Flags kept across playthroughs.
+    system: SystemData,
     prefs: Preferences,
     /// Fraction of a character of text still to reveal.
     reveal: f32,
@@ -736,6 +740,13 @@ impl Host for Engine {
             }
             0x17 => self.names = self.prefs.names.clone(),
             0x11 => vm.clear_variables(GAME_VARIABLES_END),
+            0xD7 => {
+                if self.system.unlock_scene(&text(0))
+                    && let Err(e) = self.system.store()
+                {
+                    eprintln!("could not save the system data: {e}");
+                }
+            }
             // Clear the history and the PC logs (title, extras).
             0x18 | 0xD8 => {
                 self.history = History::default();
@@ -802,6 +813,8 @@ fn hit(rect: (i32, i32, u32, u32), x: i32, y: i32) -> bool {
 /// The game.
 pub struct Game {
     title: String,
+    /// Install folder (for the original's own files).
+    root: PathBuf,
     vm: Machine,
     engine: Engine,
     /// Where saves go; `None` disables saving.
@@ -881,11 +894,13 @@ impl Game {
             load_requested: false,
             history: History::default(),
             names: Names::default(),
+            system: SystemData::default(),
             prefs: Preferences::default(),
             reveal: 0.0,
         };
         Ok(Self {
             title,
+            root: root.to_path_buf(),
             vm,
             engine,
             slots: None,
@@ -898,6 +913,13 @@ impl Game {
     /// Sets the folder for saved games; `None` disables saving.
     pub fn set_save_dir(&mut self, dir: Option<PathBuf>) {
         self.slots = dir.map(Slots::new);
+        if let Some(dir) = self.slots.as_ref().map(|s| s.dir().to_path_buf()) {
+            let original = vnr_core::resolve_ci(&self.root, "SAVE/SAVEFL99.SAV");
+            match SystemData::open(dir.join("system.sav"), original.as_deref()) {
+                Ok(data) => self.engine.system = data,
+                Err(e) => eprintln!("could not read the system data: {e}"),
+            }
+        }
         if let Some(path) = self.prefs_path() {
             self.engine.prefs = Preferences::load(&path);
             self.engine.apply_prefs();
